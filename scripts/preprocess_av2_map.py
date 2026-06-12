@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 import argparse
+import concurrent.futures
+import importlib
 import json
+import multiprocessing
 import os
 import sys
 import tempfile
 import traceback
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Sequence
+from typing import Any, Dict, List, Mapping, Optional, Sequence, cast
 
 import numpy as np
 import torch
@@ -23,7 +26,10 @@ from src.datamodule.av2_extractor_map import (  # noqa: E402
 from src.datamodule.av2_map_utils import (  # noqa: E402
     EDGE_TYPE_MAP,
     local_to_world,
+    metadata_hash,
 )
+
+_WORKER_EXTRACTOR = None
 
 
 def _json_value(value: Any) -> Any:
@@ -160,6 +166,229 @@ def _load_cache(path: Path) -> Dict[str, Any]:
         return torch.load(path, map_location="cpu")
 
 
+def _class_path(extractor_class: type) -> str:
+    return f"{extractor_class.__module__}:{extractor_class.__qualname__}"
+
+
+def _import_class(class_path: str) -> type:
+    module_name, qualname = class_path.split(":", maxsplit=1)
+    value = importlib.import_module(module_name)
+    for attribute in qualname.split("."):
+        value = getattr(value, attribute)
+    return cast(type, value)
+
+
+def _cache_matches_metadata(cache_file: Path, expected_hash: str) -> bool:
+    if not cache_file.is_file():
+        return False
+    try:
+        sample = _load_cache(cache_file)
+    except Exception:
+        return False
+    return (
+        isinstance(sample, Mapping)
+        and sample.get("metadata_hash") == expected_hash
+        and isinstance(sample.get("metadata"), Mapping)
+        and metadata_hash(sample["metadata"]) == expected_hash
+    )
+
+
+def _initialize_preprocess_worker(
+    output_dir: str,
+    extractor_config: Mapping[str, Any],
+    extractor_class_path: str,
+) -> None:
+    global _WORKER_EXTRACTOR
+    extractor_class = _import_class(extractor_class_path)
+    _WORKER_EXTRACTOR = extractor_class(
+        save_path=Path(output_dir),
+        **dict(extractor_config),
+    )
+
+
+def _preprocess_worker(source_file: str) -> Dict[str, Any]:
+    source_path = Path(source_file)
+    try:
+        if _WORKER_EXTRACTOR is None:
+            raise RuntimeError("preprocess worker was not initialized")
+        output_file = _WORKER_EXTRACTOR.save(source_path)
+        return {
+            "status": "success",
+            "scenario_id": source_path.stem,
+            "cache_file": output_file.name,
+        }
+    except Exception as error:
+        return {
+            "status": "failed",
+            "scenario_id": source_path.stem,
+            "source_file": str(source_path),
+            "error_type": type(error).__name__,
+            "error": str(error),
+            "traceback": traceback.format_exc(),
+        }
+
+
+def preprocess_files(
+    source_files: Sequence[Path],
+    *,
+    output_dir: Path,
+    extractor_config: Mapping[str, Any],
+    workers: int,
+    force: bool = False,
+    fail_fast: bool = False,
+    progress_every: int = 0,
+    progress_label: str = "",
+    extractor_class: type = Av2MapExtractor,
+) -> Dict[str, List[Dict[str, Any]]]:
+    if workers < 1:
+        raise ValueError("workers must be at least 1")
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    source_files = sorted(Path(path) for path in source_files)
+    probe_extractor = extractor_class(
+        save_path=output_dir,
+        **dict(extractor_config),
+    )
+    expected_hash = probe_extractor.metadata_hash
+    extractor_class_path = _class_path(extractor_class)
+
+    pending = []
+    skipped = []
+    for source_file in source_files:
+        cache_file = output_dir / f"{source_file.stem}.pt"
+        if not force and _cache_matches_metadata(cache_file, expected_hash):
+            skipped.append(
+                {
+                    "scenario_id": source_file.stem,
+                    "cache_file": cache_file.name,
+                }
+            )
+        else:
+            pending.append(source_file)
+
+    successful = []
+    failed = []
+    processed_count = len(skipped)
+    total_count = len(source_files)
+
+    def record(result: Mapping[str, Any]) -> bool:
+        nonlocal processed_count
+        processed_count += 1
+        if result["status"] == "success":
+            successful.append(
+                {
+                    "scenario_id": result["scenario_id"],
+                    "cache_file": result["cache_file"],
+                }
+            )
+            failed_now = False
+        else:
+            failed.append(
+                {key: value for key, value in result.items() if key != "status"}
+            )
+            failed_now = True
+        if progress_every > 0 and (
+            processed_count % progress_every == 0 or processed_count == total_count
+        ):
+            prefix = f"[{progress_label}] " if progress_label else ""
+            print(
+                f"{prefix}processed {processed_count}/{total_count} "
+                f"(saved={len(successful)}, skipped={len(skipped)}, "
+                f"failed={len(failed)})",
+                flush=True,
+            )
+        return failed_now
+
+    if workers == 1:
+        _initialize_preprocess_worker(
+            str(output_dir),
+            extractor_config,
+            extractor_class_path,
+        )
+        for source_file in pending:
+            failed_now = record(_preprocess_worker(str(source_file)))
+            if failed_now and fail_fast:
+                break
+    elif pending:
+        context = multiprocessing.get_context("spawn")
+        executor = concurrent.futures.ProcessPoolExecutor(
+            max_workers=workers,
+            mp_context=context,
+            initializer=_initialize_preprocess_worker,
+            initargs=(
+                str(output_dir),
+                extractor_config,
+                extractor_class_path,
+            ),
+        )
+        pending_iterator = iter(pending)
+        futures = {}
+
+        def submit_next() -> bool:
+            try:
+                source_file = next(pending_iterator)
+            except StopIteration:
+                return False
+            future = executor.submit(
+                _preprocess_worker,
+                str(source_file),
+            )
+            futures[future] = source_file
+            return True
+
+        try:
+            for _ in range(min(len(pending), workers * 2)):
+                submit_next()
+            stop_submitting = False
+            while futures:
+                done, _ = concurrent.futures.wait(
+                    futures,
+                    return_when=concurrent.futures.FIRST_COMPLETED,
+                )
+                for future in done:
+                    source_file = futures.pop(future)
+                    try:
+                        result = future.result()
+                    except Exception as error:
+                        result = {
+                            "status": "failed",
+                            "scenario_id": source_file.stem,
+                            "source_file": str(source_file),
+                            "error_type": type(error).__name__,
+                            "error": str(error),
+                            "traceback": traceback.format_exc(),
+                        }
+                    failed_now = record(result)
+                    if failed_now and fail_fast:
+                        stop_submitting = True
+                    if not stop_submitting:
+                        submit_next()
+        finally:
+            executor.shutdown(wait=True)
+
+    if (
+        progress_every > 0
+        and processed_count == total_count
+        and not pending
+        and skipped
+    ):
+        prefix = f"[{progress_label}] " if progress_label else ""
+        print(
+            f"{prefix}processed {processed_count}/{total_count} "
+            f"(saved=0, skipped={len(skipped)}, failed=0)",
+            flush=True,
+        )
+
+    return {
+        "successful_scenarios": sorted(
+            successful, key=lambda item: item["scenario_id"]
+        ),
+        "skipped_scenarios": sorted(skipped, key=lambda item: item["scenario_id"]),
+        "failed_scenarios": sorted(failed, key=lambda item: item["scenario_id"]),
+    }
+
+
 def _scenario_files(data_root: Path, split: str) -> List[Path]:
     return sorted((Path(data_root) / split).rglob("*.parquet"))
 
@@ -174,66 +403,84 @@ def run_preprocess(args: argparse.Namespace) -> int:
     data_root = Path(args.data_root)
     output_root = data_root / args.output_folder
     has_failures = False
+    workers = getattr(args, "workers", 1)
+    force = getattr(args, "force", False)
+    progress_every = getattr(args, "progress_every", 100)
 
     for split in args.splits:
         split_output = output_root / split
+        extractor_config = {
+            "radius": args.radius,
+            "boundary_points": args.boundary_points,
+            "mode": split,
+            "ignore_type": (5, 6, 7, 8, 9),
+            "remove_outlier_actors": True,
+        }
         extractor = Av2MapExtractor(
-            radius=args.radius,
-            boundary_points=args.boundary_points,
             save_path=split_output,
-            mode=split,
+            **extractor_config,
         )
-        successful = []
-        failed = []
         files = _limit(_scenario_files(data_root, split), args.limit)
         if not files:
             has_failures = True
-            failed.append(
-                {
-                    "scenario_id": split,
-                    "source_file": str(data_root / split),
-                    "error_type": "NoScenarioFiles",
-                    "error": f"no parquet files found for split {split}",
-                    "traceback": "",
-                }
-            )
-        for scenario_file in files:
-            try:
-                output_file = extractor.save(scenario_file)
-                successful.append(
+            result = {
+                "successful_scenarios": [],
+                "skipped_scenarios": [],
+                "failed_scenarios": [
                     {
-                        "scenario_id": scenario_file.stem,
-                        "cache_file": output_file.name,
+                        "scenario_id": split,
+                        "source_file": str(data_root / split),
+                        "error_type": "NoScenarioFiles",
+                        "error": f"no parquet files found for split {split}",
+                        "traceback": "",
                     }
-                )
-                print(f"[{split}] saved {output_file.name}")
-            except Exception as error:
-                has_failures = True
-                failure = {
-                    "scenario_id": scenario_file.stem,
-                    "source_file": str(scenario_file),
-                    "error_type": type(error).__name__,
-                    "error": str(error),
-                    "traceback": traceback.format_exc(),
-                }
-                failed.append(failure)
-                print(
-                    f"[{split}] failed {scenario_file}: "
-                    f"{type(error).__name__}: {error}",
-                    file=sys.stderr,
-                )
-                if args.fail_fast:
-                    break
+                ],
+            }
+        else:
+            result = preprocess_files(
+                files,
+                output_dir=split_output,
+                extractor_config=extractor_config,
+                workers=workers,
+                force=force,
+                fail_fast=args.fail_fast,
+                progress_every=progress_every,
+                progress_label=split,
+            )
+
+        successful = result["successful_scenarios"]
+        skipped = result["skipped_scenarios"]
+        failed = result["failed_scenarios"]
+        processed_count = len(successful) + len(skipped) + len(failed)
+        unprocessed_count = len(files) - processed_count
+        print(
+            f"[{split}] complete: saved={len(successful)}, "
+            f"skipped={len(skipped)}, failed={len(failed)}, "
+            f"unprocessed={unprocessed_count}",
+            flush=True,
+        )
+        for item in failed:
+            print(
+                f"[{split}] failed {item['source_file']}: "
+                f"{item['error_type']}: {item['error']}",
+                file=sys.stderr,
+            )
+        has_failures = has_failures or bool(failed)
 
         manifest = {
             "split": split,
             "metadata": extractor.metadata,
             "metadata_hash": extractor.metadata_hash,
             "successful_scenarios": successful,
+            "skipped_scenarios": skipped,
             "failed_scenarios": failed,
             "source_count": len(files),
             "success_count": len(successful),
+            "skipped_count": len(skipped),
             "failure_count": len(failed),
+            "unprocessed_count": unprocessed_count,
+            "workers": workers,
+            "force": force,
         }
         write_json_atomic(split_output / "manifest.json", manifest)
         if failed and args.fail_fast:
@@ -479,6 +726,20 @@ def run_inspect(args: argparse.Namespace) -> int:
     return int(not cache_files)
 
 
+def _positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("value must be at least 1")
+    return parsed
+
+
+def _nonnegative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("value must be at least 0")
+    return parsed
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Build and validate Forecast-MAE AV2 map cache v2."
@@ -497,6 +758,23 @@ def build_parser() -> argparse.ArgumentParser:
     preprocess.add_argument("--boundary-points", type=int, default=20)
     preprocess.add_argument("--radius", type=float, default=150.0)
     preprocess.add_argument("--limit", type=int)
+    preprocess.add_argument(
+        "--workers",
+        type=_positive_int,
+        default=1,
+        help="number of spawn-based worker processes",
+    )
+    preprocess.add_argument(
+        "--force",
+        action="store_true",
+        help="rebuild caches even when metadata hashes match",
+    )
+    preprocess.add_argument(
+        "--progress-every",
+        type=_nonnegative_int,
+        default=100,
+        help="print progress after this many completed scenarios; 0 disables",
+    )
     preprocess.add_argument("--fail-fast", action="store_true")
     preprocess.set_defaults(handler=run_preprocess)
 
