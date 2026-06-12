@@ -50,8 +50,11 @@ class Av2DataModule(LightningDataModule):
             batch_size=self.batch_size,
             shuffle=self.shuffle,
             num_workers=self.num_workers,
-            pin_memory=self.pin_memory,
+            pin_memory=False,
             collate_fn=collate_fn,
+            multiprocessing_context="spawn" if self.num_workers > 0 else None,
+            prefetch_factor=1 if self.num_workers > 0 else None,
+            timeout=120 if self.num_workers > 0 else 0,
         )
 
     def val_dataloader(self):
@@ -60,8 +63,11 @@ class Av2DataModule(LightningDataModule):
             batch_size=self.val_batch_size,
             shuffle=False,
             num_workers=self.num_workers,
-            pin_memory=self.pin_memory,
+            pin_memory=False,
             collate_fn=collate_fn,
+            multiprocessing_context="spawn" if self.num_workers > 0 else None,
+            prefetch_factor=1 if self.num_workers > 0 else None,
+            timeout=120 if self.num_workers > 0 else 0,
         )
 
     def test_dataloader(self):
@@ -70,6 +76,9 @@ class Av2DataModule(LightningDataModule):
             batch_size=self.test_batch_size,
             shuffle=False,
             num_workers=self.num_workers,
-            pin_memory=self.pin_memory,
+            pin_memory=False,
             collate_fn=collate_fn,
+            multiprocessing_context="spawn" if self.num_workers > 0 else None,
+            prefetch_factor=1 if self.num_workers > 0 else None,
+            timeout=120 if self.num_workers > 0 else 0,
         )

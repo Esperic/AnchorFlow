@@ -44,12 +44,17 @@ def preprocess(args):
             pb = ProgressBar(len(scenario_files), f"preprocess {mode}-set")
             pb_actor = pb.actor
 
+            futures = []
+
             for i in range(0, len(scenario_files), batch):
-                preprocess_batch.remote(
-                    extractor, scenario_files[i : i + batch], pb_actor
+                futures.append(
+                    preprocess_batch.remote(
+                        extractor, scenario_files[i: i + batch], pb_actor
+                    )
                 )
 
             pb.print_until_done()
+            ray.get(futures)
         else:
             for file in tqdm(scenario_files):
                 extractor.save(file)
