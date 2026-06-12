@@ -1,0 +1,11 @@
+_target_: src.datamodule.av2_datamodule_map.Av2MapDataModule
+
+data_root: ${data_root}
+data_folder: forecast-mae-map-v2
+train_batch_size: ${batch_size}
+val_batch_size: ${batch_size}
+test_batch_size: ${batch_size}
+shuffle: true
+num_workers: ${num_workers}
+pin_memory: true
+validate_on_load: false
