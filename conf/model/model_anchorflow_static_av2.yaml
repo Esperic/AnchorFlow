@@ -1,0 +1,35 @@
+name: anchorflow-static-av2
+phase: forecast
+
+target:
+  _target_: src.model.anchorflow.trainer.StaticAnchorFlowTrainer
+  anchor_path: ${anchor_path}
+  dim: 128
+  historical_steps: 50
+  future_steps: 60
+  num_modes: 6
+  encoder_depth: 4
+  num_heads: 8
+  mlp_ratio: 4.0
+  qkv_bias: false
+  drop_path: 0.2
+  flow_num_heads: 8
+  flow_mlp_ratio: 2.0
+  flow_path: linear
+  flow_prediction: velocity
+  source_distribution: standard_normal
+  time_distribution: uniform
+  integration_method: euler
+  integration_steps: 10
+  eval_noise_seed: 2333
+  residual_scale_min: 0.5
+  velocity_output_zero_init: true
+  pretrained_weights: ${pretrained_weights}
+  flow_weight: 1.0
+  score_weight: 1.0
+  other_weight: 1.0
+  lr: ${lr}
+  weight_decay: ${weight_decay}
+  epochs: ${epochs}
+  warmup_epochs: ${warmup_epochs}
+

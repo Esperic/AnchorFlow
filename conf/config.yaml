@@ -10,6 +10,7 @@ save_top_k: 10
 data_root:
 checkpoint:
 pretrained_weights:
+anchor_path: assets/anchors/av2_k6.pt
 output: ${model.name}-${model.phase}
 
 # trainer
@@ -29,6 +30,7 @@ gradient_clip_algorithm: norm
 limit_train_batches:
 limit_val_batches:
 limit_test_batches:
+overfit_batches: 0.0
 log_model: all
 test: false
 

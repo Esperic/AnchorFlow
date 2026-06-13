@@ -52,6 +52,7 @@ def main(conf):
         devices=conf.gpus,
         strategy="ddp_find_unused_parameters_false" if conf.gpus > 1 else None,
         callbacks=callbacks,
+        overfit_batches=conf.overfit_batches,
         limit_train_batches=conf.limit_train_batches,
         limit_val_batches=conf.limit_val_batches,
         sync_batchnorm=conf.sync_bn,
