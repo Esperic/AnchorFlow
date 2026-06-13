@@ -78,7 +78,7 @@ class ModelForecast(nn.Module):
         }
         return self.load_state_dict(state_dict=state_dict, strict=False)
 
-    def forward(self, data):
+    def encode_scene(self, data):
         hist_padding_mask = data["x_padding_mask"][:, :, :50]
         hist_key_padding_mask = data["x_key_padding_mask"]
         hist_feat = torch.cat(
@@ -132,10 +132,24 @@ class ModelForecast(nn.Module):
             x_encoder = blk(x_encoder, key_padding_mask=key_padding_mask)
         x_encoder = self.norm(x_encoder)
 
-        x_agent = x_encoder[:, 0]
-        y_hat, pi = self.decoder(x_agent)
+        actor_tokens = x_encoder[:, :N]
+        lane_tokens = x_encoder[:, N:]
+        return {
+            "scene_tokens": x_encoder,
+            "scene_padding_mask": key_padding_mask,
+            "actor_tokens": actor_tokens,
+            "actor_padding_mask": data["x_key_padding_mask"],
+            "lane_tokens": lane_tokens,
+            "lane_padding_mask": data["lane_key_padding_mask"],
+            "target_token": actor_tokens[:, 0],
+        }
 
-        x_others = x_encoder[:, 1:N]
+    def forward(self, data):
+        scene_encoding = self.encode_scene(data)
+        y_hat, pi = self.decoder(scene_encoding["target_token"])
+
+        x_others = scene_encoding["actor_tokens"][:, 1:]
+        B = x_others.shape[0]
         y_hat_others = self.dense_predictor(x_others).view(B, -1, 60, 2)
 
         return {
