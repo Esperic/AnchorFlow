@@ -1,6 +1,6 @@
 import datetime
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Mapping
 
 import pytorch_lightning as pl
 import torch
@@ -18,7 +18,7 @@ from .model import StaticAnchorFlowModel
 class StaticAnchorFlowTrainer(pl.LightningModule):
     def __init__(
         self,
-        anchor_path: str,
+        anchor_paths: Mapping[str, str],
         dim: int = 128,
         historical_steps: int = 50,
         future_steps: int = 60,
@@ -68,7 +68,7 @@ class StaticAnchorFlowTrainer(pl.LightningModule):
         self.other_weight = other_weight
 
         self.net = StaticAnchorFlowModel(
-            anchor_path=anchor_path,
+            anchor_paths=anchor_paths,
             embed_dim=dim,
             encoder_depth=encoder_depth,
             num_heads=num_heads,
@@ -83,7 +83,9 @@ class StaticAnchorFlowTrainer(pl.LightningModule):
             eval_noise_seed=eval_noise_seed,
             velocity_output_zero_init=velocity_output_zero_init,
         )
-        if torch.any(self.net.residual_scale < residual_scale_min):
+        if torch.any(
+            self.net.residual_scales_by_family < residual_scale_min
+        ):
             raise ValueError(
                 "anchor artifact residual scale violates residual_scale_min"
             )
@@ -125,9 +127,10 @@ class StaticAnchorFlowTrainer(pl.LightningModule):
     def _shared_loss(self, data) -> Dict[str, torch.Tensor]:
         targets = data["y"][:, 0].to(torch.float32)
         focal_valid_mask = ~data["x_padding_mask"][:, 0, 50:]
+        anchor_selection = self.net.select_anchor_bank(data)
         flow_batch = build_matched_flow_batch(
-            anchors=self.net.anchor_prototypes,
-            residual_scale=self.net.residual_scale,
+            anchors=anchor_selection.anchors,
+            residual_scale=anchor_selection.residual_scales,
             targets=targets,
             valid_mask=focal_valid_mask,
         )
@@ -136,6 +139,7 @@ class StaticAnchorFlowTrainer(pl.LightningModule):
             residual_state=flow_batch.flow.state,
             time=flow_batch.flow.time,
             matched_mode=flow_batch.matched_mode,
+            anchor_prototypes=anchor_selection.anchors,
         )
         losses = compute_stage3_losses(
             predicted_velocity=output["predicted_velocity"],
@@ -276,4 +280,3 @@ class StaticAnchorFlowTrainer(pl.LightningModule):
             epochs=self.epochs,
         )
         return [optimizer], [scheduler]
-

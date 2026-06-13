@@ -31,11 +31,26 @@ def build_matched_flow_batch(
             targets,
             valid_mask,
         )
-        expanded_anchors = anchors.unsqueeze(0).expand(
-            targets.shape[0], *anchors.shape
-        )
+        if anchors.ndim == 3:
+            expanded_anchors = anchors.unsqueeze(0).expand(
+                targets.shape[0], *anchors.shape
+            )
+        elif anchors.ndim == 4 and anchors.shape[0] == targets.shape[0]:
+            expanded_anchors = anchors
+        else:
+            raise ValueError(
+                "anchors must have shape [K,T,2] or [B,K,T,2]"
+            )
         reference = gather_modes(expanded_anchors, matched_mode)
-        target_residual = (targets - reference) / residual_scale.view(1, 1, 2)
+        if residual_scale.shape == (2,):
+            scale = residual_scale.view(1, 1, 2)
+        elif residual_scale.shape == (targets.shape[0], 2):
+            scale = residual_scale[:, None]
+        else:
+            raise ValueError(
+                "residual_scale must have shape [2] or [B,2]"
+            )
+        target_residual = (targets - reference) / scale
         target_residual = target_residual.masked_fill(
             ~valid_mask.unsqueeze(-1), 0.0
         )
@@ -122,4 +137,3 @@ def compute_stage3_losses(
         "valid_focal_count": valid_count,
         "invalid_focal_count": valid_rows.numel() - valid_count,
     }
-

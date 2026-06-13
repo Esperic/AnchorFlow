@@ -10,7 +10,10 @@ save_top_k: 10
 data_root:
 checkpoint:
 pretrained_weights:
-anchor_path: assets/anchors/av2_k6.pt
+anchor_paths:
+  vehicle: assets/anchors/av2_vehicle_bus_k6.pt
+  cyclist: assets/anchors/av2_cyclist_motorcyclist_k6.pt
+  pedestrian: assets/anchors/av2_pedestrian_k6.pt
 output: ${model.name}-${model.phase}
 
 # trainer

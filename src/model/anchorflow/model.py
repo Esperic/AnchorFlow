@@ -1,11 +1,15 @@
-from typing import Dict, Optional
+from typing import Dict, Mapping, Optional
 
 import torch
 import torch.nn as nn
 
 from src.model.model_forecast import ModelForecast
 
-from .anchors import load_anchor_artifact
+from .anchors import (
+    AnchorSelection,
+    actor_types_to_anchor_family,
+    load_anchor_bank,
+)
 from .flow import (
     AnchorResidualVelocityField,
     euler_integrate,
@@ -17,7 +21,7 @@ from .matching import gather_modes
 class StaticAnchorFlowModel(nn.Module):
     def __init__(
         self,
-        anchor_path: str,
+        anchor_paths: Mapping[str, str],
         embed_dim: int = 128,
         encoder_depth: int = 4,
         num_heads: int = 8,
@@ -33,8 +37,8 @@ class StaticAnchorFlowModel(nn.Module):
         velocity_output_zero_init: bool = True,
     ) -> None:
         super().__init__()
-        artifact = load_anchor_artifact(
-            anchor_path,
+        anchor_bank = load_anchor_bank(
+            anchor_paths,
             expected_num_modes=num_modes,
             expected_future_steps=future_steps,
         )
@@ -42,16 +46,16 @@ class StaticAnchorFlowModel(nn.Module):
         self.num_modes = num_modes
         self.integration_steps = integration_steps
         self.eval_noise_seed = eval_noise_seed
-        self.anchor_metadata = artifact["metadata"]
-        self.anchor_content_hash = artifact["content_hash"]
+        self.anchor_metadata = anchor_bank.metadata
+        self.anchor_content_hashes = anchor_bank.content_hashes
         self.register_buffer(
-            "anchor_prototypes",
-            artifact["anchors"].clone(),
+            "anchor_prototypes_by_family",
+            anchor_bank.anchors.clone(),
             persistent=True,
         )
         self.register_buffer(
-            "residual_scale",
-            artifact["residual_scale"].clone(),
+            "residual_scales_by_family",
+            anchor_bank.residual_scales.clone(),
             persistent=True,
         )
 
@@ -114,16 +118,31 @@ class StaticAnchorFlowModel(nn.Module):
         )
         return scene, y_hat_others
 
-    def score_modes(self, target_token: torch.Tensor) -> torch.Tensor:
+    def select_anchor_bank(
+        self,
+        data: Dict[str, torch.Tensor],
+    ) -> AnchorSelection:
+        raw_actor_types = data["x_attr"][:, 0, 0].long()
+        family_index, fallback_mask, map_applicable_mask = (
+            actor_types_to_anchor_family(raw_actor_types)
+        )
+        return AnchorSelection(
+            anchors=self.anchor_prototypes_by_family[family_index],
+            residual_scales=self.residual_scales_by_family[family_index],
+            family_index=family_index,
+            fallback_mask=fallback_mask,
+            map_applicable_mask=map_applicable_mask,
+        )
+
+    def score_modes(
+        self,
+        target_token: torch.Tensor,
+        anchor_prototypes: torch.Tensor,
+    ) -> torch.Tensor:
         prototype_features = self.prototype_encoder(
-            self.anchor_prototypes.flatten(start_dim=1)
+            anchor_prototypes.flatten(start_dim=2)
         )
         batch_size = target_token.shape[0]
-        prototype_features = prototype_features.unsqueeze(0).expand(
-            batch_size,
-            self.num_modes,
-            -1,
-        )
         target_features = target_token[:, None].expand(
             batch_size,
             self.num_modes,
@@ -139,14 +158,14 @@ class StaticAnchorFlowModel(nn.Module):
         residual_state: torch.Tensor,
         time: torch.Tensor,
         matched_mode: torch.Tensor,
+        anchor_prototypes: Optional[torch.Tensor] = None,
     ) -> Dict[str, torch.Tensor]:
         scene, y_hat_others = self.encode_context(data)
-        batch_size = residual_state.shape[0]
-        references = self.anchor_prototypes.unsqueeze(0).expand(
-            batch_size,
-            self.num_modes,
-            self.future_steps,
-            2,
+        selection = self.select_anchor_bank(data)
+        references = (
+            selection.anchors
+            if anchor_prototypes is None
+            else anchor_prototypes
         )
         matched_reference = gather_modes(references, matched_mode)
         predicted_velocity = self.velocity_field(
@@ -159,7 +178,7 @@ class StaticAnchorFlowModel(nn.Module):
         )[:, 0]
         return {
             "predicted_velocity": predicted_velocity,
-            "pi": self.score_modes(scene["target_token"]),
+            "pi": self.score_modes(scene["target_token"], references),
             "y_hat_others": y_hat_others,
         }
 
@@ -167,17 +186,10 @@ class StaticAnchorFlowModel(nn.Module):
         self,
         source: torch.Tensor,
         scene: Dict[str, torch.Tensor],
+        references: torch.Tensor,
         steps: Optional[int] = None,
         return_states: bool = False,
     ):
-        batch_size = source.shape[0]
-        references = self.anchor_prototypes.unsqueeze(0).expand(
-            batch_size,
-            self.num_modes,
-            self.future_steps,
-            2,
-        )
-
         def field(state, time):
             return self.velocity_field(
                 residual_state=state,
@@ -203,6 +215,7 @@ class StaticAnchorFlowModel(nn.Module):
         return_states: bool = False,
     ) -> Dict[str, torch.Tensor]:
         scene, y_hat_others = self.encode_context(data)
+        selection = self.select_anchor_bank(data)
         batch_size = scene["scene_tokens"].shape[0]
         if source_noise is None:
             if not self.training and "scenario_id" in data:
@@ -226,6 +239,7 @@ class StaticAnchorFlowModel(nn.Module):
         integrated = self.integrate_residuals(
             source_noise,
             scene,
+            selection.anchors,
             steps=integration_steps,
             return_states=return_states,
         )
@@ -235,14 +249,20 @@ class StaticAnchorFlowModel(nn.Module):
             residual = integrated
             states = None
         y_hat = (
-            self.anchor_prototypes.unsqueeze(0)
-            + self.residual_scale.view(1, 1, 1, 2) * residual
+            selection.anchors
+            + selection.residual_scales[:, None, None] * residual
         )
         output = {
             "y_hat": y_hat,
-            "pi": self.score_modes(scene["target_token"]),
+            "pi": self.score_modes(
+                scene["target_token"],
+                selection.anchors,
+            ),
             "y_hat_others": y_hat_others,
-            "anchor_prototypes": self.anchor_prototypes,
+            "anchor_prototypes": selection.anchors,
+            "anchor_family_index": selection.family_index,
+            "anchor_family_fallback_mask": selection.fallback_mask,
+            "map_applicable_mask": selection.map_applicable_mask,
         }
         if states is not None:
             output["residual_integration_states"] = states

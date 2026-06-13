@@ -3,7 +3,7 @@ phase: forecast
 
 target:
   _target_: src.model.anchorflow.trainer.StaticAnchorFlowTrainer
-  anchor_path: ${anchor_path}
+  anchor_paths: ${anchor_paths}
   dim: 128
   historical_steps: 50
   future_steps: 60
@@ -32,4 +32,3 @@ target:
   weight_decay: ${weight_decay}
   epochs: ${epochs}
   warmup_epochs: ${warmup_epochs}
-

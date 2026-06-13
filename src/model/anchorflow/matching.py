@@ -8,17 +8,23 @@ def masked_anchor_distances(
     targets: torch.Tensor,
     valid_mask: torch.Tensor,
 ) -> torch.Tensor:
-    if anchors.ndim != 3 or anchors.shape[-1] != 2:
-        raise ValueError("anchors must have shape [K, T, 2]")
+    if anchors.ndim not in (3, 4) or anchors.shape[-1] != 2:
+        raise ValueError("anchors must have shape [K, T, 2] or [B, K, T, 2]")
     if targets.ndim != 3 or targets.shape[-1] != 2:
         raise ValueError("targets must have shape [B, T, 2]")
-    if anchors.shape[1:] != targets.shape[1:]:
+    if anchors.ndim == 3 and anchors.shape[1:] != targets.shape[1:]:
         raise ValueError("anchors and targets must share [T, 2]")
+    if anchors.ndim == 4 and (
+        anchors.shape[0] != targets.shape[0]
+        or anchors.shape[2:] != targets.shape[1:]
+    ):
+        raise ValueError("batched anchors must have shape [B, K, T, 2]")
     if valid_mask.shape != targets.shape[:2]:
         raise ValueError("valid_mask must have shape [B, T]")
 
+    anchor_batch = anchors[None] if anchors.ndim == 3 else anchors
     point_distance = torch.linalg.vector_norm(
-        targets[:, None] - anchors[None],
+        targets[:, None] - anchor_batch,
         dim=-1,
     )
     weights = valid_mask[:, None].to(point_distance.dtype)
@@ -62,4 +68,3 @@ def gather_modes(values: torch.Tensor, mode_index: torch.Tensor) -> torch.Tensor
         raise ValueError("mode_index must have shape [B]")
     batch_index = torch.arange(values.shape[0], device=values.device)
     return values[batch_index, mode_index]
-

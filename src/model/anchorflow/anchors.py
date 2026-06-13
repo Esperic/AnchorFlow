@@ -1,13 +1,76 @@
 import hashlib
 import json
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Mapping, Tuple
 
 import torch
 
 
 ANCHOR_ARTIFACT_VERSION = 1
 MIN_RESIDUAL_SCALE = 0.5
+ANCHOR_FAMILIES = ("vehicle", "cyclist", "pedestrian")
+ANCHOR_FAMILY_OBJECT_TYPES = {
+    "vehicle": (0, 4),
+    "cyclist": (2, 3),
+    "pedestrian": (1,),
+}
+_FAMILY_INDEX = {
+    family: index for index, family in enumerate(ANCHOR_FAMILIES)
+}
+
+
+@dataclass(frozen=True)
+class AnchorSelection:
+    anchors: torch.Tensor
+    residual_scales: torch.Tensor
+    family_index: torch.Tensor
+    fallback_mask: torch.Tensor
+    map_applicable_mask: torch.Tensor
+
+
+@dataclass(frozen=True)
+class AnchorBank:
+    anchors: torch.Tensor
+    residual_scales: torch.Tensor
+    metadata: Dict[str, Dict[str, Any]]
+    content_hashes: Dict[str, str]
+
+    def select(self, raw_actor_types: torch.Tensor) -> AnchorSelection:
+        family_index, fallback_mask, map_applicable_mask = (
+            actor_types_to_anchor_family(raw_actor_types)
+        )
+        return AnchorSelection(
+            anchors=self.anchors.to(raw_actor_types.device)[family_index],
+            residual_scales=self.residual_scales.to(raw_actor_types.device)[
+                family_index
+            ],
+            family_index=family_index,
+            fallback_mask=fallback_mask,
+            map_applicable_mask=map_applicable_mask,
+        )
+
+
+def actor_types_to_anchor_family(
+    raw_actor_types: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    raw_actor_types = raw_actor_types.long()
+    pedestrian_index = _FAMILY_INDEX["pedestrian"]
+    family_index = torch.full_like(raw_actor_types, pedestrian_index)
+
+    vehicle_mask = (raw_actor_types == 0) | (raw_actor_types == 4)
+    cyclist_mask = (raw_actor_types == 2) | (raw_actor_types == 3)
+    pedestrian_mask = raw_actor_types == 1
+    riderless_bicycle_mask = raw_actor_types == 8
+
+    family_index[vehicle_mask] = _FAMILY_INDEX["vehicle"]
+    family_index[cyclist_mask | riderless_bicycle_mask] = _FAMILY_INDEX[
+        "cyclist"
+    ]
+    supported_mask = vehicle_mask | cyclist_mask | pedestrian_mask
+    fallback_mask = ~supported_mask
+    map_applicable_mask = vehicle_mask | cyclist_mask
+    return family_index, fallback_mask, map_applicable_mask
 
 
 def _validate_tensors(
@@ -69,6 +132,17 @@ def build_anchor_artifact(
     _validate_tensors(anchors, residual_scale)
     if metadata.get("split") != "train":
         raise ValueError("anchor metadata split must be 'train'")
+    actor_family = metadata.get("actor_family")
+    if actor_family not in ANCHOR_FAMILIES:
+        raise ValueError(
+            f"anchor metadata actor_family must be one of {ANCHOR_FAMILIES}"
+        )
+    object_type_ids = tuple(metadata.get("object_type_ids", ()))
+    if object_type_ids != ANCHOR_FAMILY_OBJECT_TYPES[actor_family]:
+        raise ValueError(
+            f"actor_family {actor_family!r} requires object_type_ids "
+            f"{ANCHOR_FAMILY_OBJECT_TYPES[actor_family]}, got {object_type_ids}"
+        )
 
     artifact = {
         "version": ANCHOR_ARTIFACT_VERSION,
@@ -127,6 +201,12 @@ def load_anchor_artifact(
     _validate_tensors(artifact["anchors"], artifact["residual_scale"])
     if artifact["metadata"].get("split") != "train":
         raise ValueError("anchor artifact must be generated from the train split")
+    actor_family = artifact["metadata"].get("actor_family")
+    if actor_family not in ANCHOR_FAMILIES:
+        raise ValueError("anchor artifact has invalid actor_family metadata")
+    object_type_ids = tuple(artifact["metadata"].get("object_type_ids", ()))
+    if object_type_ids != ANCHOR_FAMILY_OBJECT_TYPES[actor_family]:
+        raise ValueError("anchor artifact object_type_ids do not match actor_family")
     expected_hash = compute_anchor_content_hash(artifact)
     if artifact["content_hash"] != expected_hash:
         raise ValueError(
@@ -146,6 +226,49 @@ def load_anchor_artifact(
             f"expected {expected_future_steps} future steps, got {anchors.shape[1]}"
         )
     return artifact
+
+
+def load_anchor_bank(
+    anchor_paths: Mapping[str, str],
+    expected_num_modes: int,
+    expected_future_steps: int,
+) -> AnchorBank:
+    if set(anchor_paths) != set(ANCHOR_FAMILIES):
+        raise ValueError(
+            f"anchor_paths must contain exactly {ANCHOR_FAMILIES}, "
+            f"got {tuple(anchor_paths)}"
+        )
+    artifacts = {}
+    for family in ANCHOR_FAMILIES:
+        artifact = load_anchor_artifact(
+            anchor_paths[family],
+            expected_num_modes=expected_num_modes,
+            expected_future_steps=expected_future_steps,
+        )
+        if artifact["metadata"]["actor_family"] != family:
+            raise ValueError(
+                f"anchor path for {family!r} contains "
+                f"{artifact['metadata']['actor_family']!r} artifact"
+            )
+        artifacts[family] = artifact
+    return AnchorBank(
+        anchors=torch.stack(
+            [artifacts[family]["anchors"] for family in ANCHOR_FAMILIES]
+        ),
+        residual_scales=torch.stack(
+            [
+                artifacts[family]["residual_scale"]
+                for family in ANCHOR_FAMILIES
+            ]
+        ),
+        metadata={
+            family: artifacts[family]["metadata"] for family in ANCHOR_FAMILIES
+        },
+        content_hashes={
+            family: artifacts[family]["content_hash"]
+            for family in ANCHOR_FAMILIES
+        },
+    )
 
 
 def compute_residual_scale(
@@ -170,4 +293,3 @@ def compute_residual_scale(
     if not torch.isfinite(scale).all():
         raise ValueError("computed residual scale is not finite")
     return scale.to(torch.float32)
-
