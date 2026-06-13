@@ -2,6 +2,7 @@ defaults:
   - hydra: default
   - datamodule: av2
   - model: model_forecast
+  - _self_
 
 seed: 2333
 monitor: val_loss

@@ -12,6 +12,8 @@ from pytorch_lightning.callbacks import (
 )
 from pytorch_lightning.loggers import TensorBoardLogger, WandbLogger
 
+from src.utils.trainer_config import resolve_trainer_strategy
+
 
 @hydra.main(version_base=None, config_path="conf", config_name="config")
 def main(conf):
@@ -50,7 +52,7 @@ def main(conf):
         max_epochs=conf.epochs,
         accelerator="gpu",
         devices=conf.gpus,
-        strategy="ddp_find_unused_parameters_false" if conf.gpus > 1 else None,
+        strategy=resolve_trainer_strategy(conf.gpus),
         callbacks=callbacks,
         overfit_batches=conf.overfit_batches,
         limit_train_batches=conf.limit_train_batches,
