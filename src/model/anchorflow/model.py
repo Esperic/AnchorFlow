@@ -35,6 +35,7 @@ class StaticAnchorFlowModel(nn.Module):
         integration_steps: int = 5,
         eval_noise_seed: int = 2333,
         velocity_output_zero_init: bool = True,
+        freeze_scene_encoder: bool = False,
     ) -> None:
         super().__init__()
         anchor_bank = load_anchor_bank(
@@ -46,6 +47,7 @@ class StaticAnchorFlowModel(nn.Module):
         self.num_modes = num_modes
         self.integration_steps = integration_steps
         self.eval_noise_seed = eval_noise_seed
+        self.freeze_scene_encoder = bool(freeze_scene_encoder)
         self.anchor_metadata = anchor_bank.metadata
         self.anchor_content_hashes = anchor_bank.content_hashes
         self.register_buffer(
@@ -69,6 +71,8 @@ class StaticAnchorFlowModel(nn.Module):
             future_steps=future_steps,
         )
         self.scene_encoder.decoder.requires_grad_(False)
+        if self.freeze_scene_encoder:
+            self.scene_encoder.requires_grad_(False)
         self.prototype_encoder = nn.Sequential(
             nn.Linear(future_steps * 2, embed_dim),
             nn.GELU(),
@@ -86,6 +90,12 @@ class StaticAnchorFlowModel(nn.Module):
             mlp_ratio=flow_mlp_ratio,
             zero_init_output=velocity_output_zero_init,
         )
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        if self.freeze_scene_encoder:
+            self.scene_encoder.eval()
+        return self
 
     def load_scene_encoder_checkpoint(self, checkpoint_path: str):
         try:

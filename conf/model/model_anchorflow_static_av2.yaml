@@ -25,6 +25,7 @@ target:
   eval_noise_seed: 2333
   residual_scale_min: 0.5
   velocity_output_zero_init: true
+  freeze_scene_encoder: false
   pretrained_weights: ${pretrained_weights}
   flow_weight: 1.0
   score_weight: 1.0

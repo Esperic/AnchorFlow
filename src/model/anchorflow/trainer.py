@@ -40,6 +40,7 @@ class StaticAnchorFlowTrainer(pl.LightningModule):
         eval_noise_seed: int = 2333,
         residual_scale_min: float = 0.5,
         velocity_output_zero_init: bool = True,
+        freeze_scene_encoder: bool = False,
         pretrained_weights: str = None,
         flow_weight: float = 1.0,
         score_weight: float = 1.0,
@@ -83,6 +84,7 @@ class StaticAnchorFlowTrainer(pl.LightningModule):
             integration_steps=integration_steps,
             eval_noise_seed=eval_noise_seed,
             velocity_output_zero_init=velocity_output_zero_init,
+            freeze_scene_encoder=freeze_scene_encoder,
         )
         if torch.any(
             self.net.residual_scales_by_family < residual_scale_min
