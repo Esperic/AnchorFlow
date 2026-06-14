@@ -32,7 +32,7 @@ class StaticAnchorFlowModel(nn.Module):
         num_modes: int = 6,
         flow_num_heads: int = 8,
         flow_mlp_ratio: float = 2.0,
-        integration_steps: int = 10,
+        integration_steps: int = 5,
         eval_noise_seed: int = 2333,
         velocity_output_zero_init: bool = True,
     ) -> None:

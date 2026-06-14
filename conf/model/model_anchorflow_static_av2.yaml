@@ -19,8 +19,9 @@ target:
   flow_prediction: velocity
   source_distribution: standard_normal
   time_distribution: uniform
+  flow_time_max: 0.95
   integration_method: euler
-  integration_steps: 10
+  integration_steps: 5
   eval_noise_seed: 2333
   residual_scale_min: 0.5
   velocity_output_zero_init: true

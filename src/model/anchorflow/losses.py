@@ -24,7 +24,10 @@ def build_matched_flow_batch(
     valid_mask: torch.Tensor,
     source: Optional[torch.Tensor] = None,
     time: Optional[torch.Tensor] = None,
+    flow_time_max: float = 1.0,
 ) -> MatchedFlowBatch:
+    if not 0.0 < float(flow_time_max) <= 1.0:
+        raise ValueError("flow_time_max must be within (0, 1]")
     with torch.no_grad():
         matched_mode, valid_rows = hard_match_anchors(
             anchors,
@@ -61,7 +64,7 @@ def build_matched_flow_batch(
             targets.shape[0],
             device=targets.device,
             dtype=torch.float32,
-        )
+        ) * float(flow_time_max)
     flow = build_linear_flow_sample(
         source=source,
         target=target_residual,

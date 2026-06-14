@@ -34,8 +34,9 @@ class StaticAnchorFlowTrainer(pl.LightningModule):
         flow_prediction: str = "velocity",
         source_distribution: str = "standard_normal",
         time_distribution: str = "uniform",
+        flow_time_max: float = 0.95,
         integration_method: str = "euler",
-        integration_steps: int = 10,
+        integration_steps: int = 5,
         eval_noise_seed: int = 2333,
         residual_scale_min: float = 0.5,
         velocity_output_zero_init: bool = True,
@@ -54,6 +55,7 @@ class StaticAnchorFlowTrainer(pl.LightningModule):
             flow_prediction=flow_prediction,
             source_distribution=source_distribution,
             time_distribution=time_distribution,
+            flow_time_max=flow_time_max,
             integration_method=integration_method,
             residual_scale_min=residual_scale_min,
         )
@@ -119,11 +121,17 @@ class StaticAnchorFlowTrainer(pl.LightningModule):
                 )
         if config["residual_scale_min"] < 0.5:
             raise ValueError("residual_scale_min must be at least 0.5")
+        if not 0.0 < float(config["flow_time_max"]) <= 1.0:
+            raise ValueError("flow_time_max must be within (0, 1]")
 
     def forward(self, data):
         return self.net(data)
 
-    def _shared_loss(self, data) -> Dict[str, torch.Tensor]:
+    def _shared_loss(
+        self,
+        data,
+        flow_time_max: float,
+    ) -> Dict[str, torch.Tensor]:
         targets = data["y"][:, 0].to(torch.float32)
         focal_valid_mask = ~data["x_padding_mask"][:, 0, 50:]
         anchor_selection = self.net.select_anchor_bank(data)
@@ -132,6 +140,7 @@ class StaticAnchorFlowTrainer(pl.LightningModule):
             residual_scale=anchor_selection.residual_scales,
             targets=targets,
             valid_mask=focal_valid_mask,
+            flow_time_max=flow_time_max,
         )
         output = self.net.training_outputs(
             data,
@@ -174,7 +183,10 @@ class StaticAnchorFlowTrainer(pl.LightningModule):
 
     def training_step(self, data, batch_idx):
         del batch_idx
-        losses = self._shared_loss(data)
+        losses = self._shared_loss(
+            data,
+            flow_time_max=float(self.hparams.flow_time_max),
+        )
         for name, value in losses.items():
             self.log(
                 f"train/{name}",
@@ -188,7 +200,7 @@ class StaticAnchorFlowTrainer(pl.LightningModule):
 
     def validation_step(self, data, batch_idx):
         del batch_idx
-        losses = self._shared_loss(data)
+        losses = self._shared_loss(data, flow_time_max=1.0)
         self.log(
             "val_loss",
             losses["loss"],
