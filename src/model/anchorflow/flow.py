@@ -146,19 +146,77 @@ def euler_integrate(
 class SinusoidalTimeEmbedding(nn.Module):
     def __init__(self, embed_dim: int) -> None:
         super().__init__()
-        if embed_dim < 4 or embed_dim % 2 != 0:
-            raise ValueError("embed_dim must be an even integer of at least 4")
+        if embed_dim < 8 or embed_dim % 2 != 0:
+            raise ValueError("embed_dim must be an even integer of at least 8")
         self.embed_dim = embed_dim
 
     def forward(self, time: torch.Tensor) -> torch.Tensor:
-        half_dim = self.embed_dim // 2
-        exponent = -math.log(10000.0) * torch.arange(
-            half_dim,
-            device=time.device,
-            dtype=torch.float32,
-        ) / max(half_dim - 1, 1)
-        angles = time.to(torch.float32).unsqueeze(-1) * exponent.exp()
-        return torch.cat([angles.sin(), angles.cos()], dim=-1)
+        time = time.to(torch.float32)
+        remaining = (1.0 - time).clamp_min(1e-6)
+        frequency_count = (self.embed_dim - 4) // 2
+        frequencies = torch.exp(
+            torch.linspace(
+                0.0,
+                math.log(64.0),
+                frequency_count,
+                device=time.device,
+                dtype=torch.float32,
+            )
+        )
+        angles = (
+            2.0
+            * math.pi
+            * time.unsqueeze(-1)
+            * frequencies
+        )
+        endpoint_features = torch.stack(
+            [
+                time,
+                remaining,
+                time * remaining,
+                -remaining.log(),
+            ],
+            dim=-1,
+        )
+        return torch.cat(
+            [endpoint_features, angles.sin(), angles.cos()],
+            dim=-1,
+        )
+
+
+class TimeConditionedResidualSkip(nn.Module):
+    def __init__(
+        self,
+        embed_dim: int,
+        zero_init_output: bool,
+    ) -> None:
+        super().__init__()
+        self.conditioner = nn.Sequential(
+            nn.LayerNorm(embed_dim),
+            nn.Linear(embed_dim, embed_dim),
+            nn.GELU(),
+        )
+        self.matrix_projection = nn.Linear(embed_dim, 4)
+        if zero_init_output:
+            nn.init.zeros_(self.matrix_projection.weight)
+            nn.init.zeros_(self.matrix_projection.bias)
+
+    def forward(
+        self,
+        residual_state: torch.Tensor,
+        time_embedding: torch.Tensor,
+    ) -> torch.Tensor:
+        if residual_state.ndim != 3 or residual_state.shape[-1] != 2:
+            raise ValueError("residual_state must have shape [N, T, 2]")
+        if time_embedding.shape != (
+            residual_state.shape[0],
+            self.matrix_projection.in_features,
+        ):
+            raise ValueError("time_embedding must have shape [N, D]")
+        matrix = self.matrix_projection(
+            self.conditioner(time_embedding)
+        ).view(-1, 2, 2)
+        return torch.einsum("nij,ntj->nti", matrix, residual_state)
 
 
 class AnchorResidualVelocityField(nn.Module):
@@ -178,6 +236,7 @@ class AnchorResidualVelocityField(nn.Module):
             nn.GELU(),
             nn.Linear(embed_dim, embed_dim),
         )
+        self.residual_film = nn.Linear(embed_dim, embed_dim * 2)
         self.anchor_encoder = nn.Sequential(
             nn.Linear(2, embed_dim),
             nn.GELU(),
@@ -227,11 +286,13 @@ class AnchorResidualVelocityField(nn.Module):
         )
         self.output_norm = nn.LayerNorm(embed_dim)
         self.velocity_projection = nn.Linear(embed_dim, 2)
-        self.residual_skip = nn.Linear(2, 2, bias=False)
+        self.residual_skip = TimeConditionedResidualSkip(
+            embed_dim,
+            zero_init_output=zero_init_output,
+        )
         if zero_init_output:
             nn.init.zeros_(self.velocity_projection.weight)
             nn.init.zeros_(self.velocity_projection.bias)
-            nn.init.zeros_(self.residual_skip.weight)
 
     def _expand_time(
         self,
@@ -298,6 +359,13 @@ class AnchorResidualVelocityField(nn.Module):
             self.future_steps,
             -1,
         )
+        residual_features = self.residual_encoder(flat_residual)
+        residual_scale, residual_bias = self.residual_film(
+            time_embedding[:, 0]
+        ).chunk(2, dim=-1)
+        residual_features = residual_features * (
+            1.0 + residual_scale[:, None]
+        ) + residual_bias[:, None]
         target_embedding = self.target_encoder(target_token)
         target_embedding = target_embedding[:, None].expand(
             batch_size,
@@ -312,7 +380,7 @@ class AnchorResidualVelocityField(nn.Module):
         query = self.fusion_projection(
             torch.cat(
                 [
-                    self.residual_encoder(flat_residual),
+                    residual_features,
                     self.anchor_encoder(flat_reference),
                     time_embedding,
                     target_embedding,
@@ -345,7 +413,10 @@ class AnchorResidualVelocityField(nn.Module):
         hidden = query + attended
         hidden = hidden + self.output_block(hidden)
         velocity = self.velocity_projection(self.output_norm(hidden))
-        velocity = velocity + self.residual_skip(flat_residual)
+        velocity = velocity + self.residual_skip(
+            flat_residual,
+            time_embedding[:, 0],
+        )
         return velocity.view(
             batch_size,
             num_modes,
