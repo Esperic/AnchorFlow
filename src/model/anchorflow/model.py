@@ -171,8 +171,8 @@ class StaticAnchorFlowModel(nn.Module):
         predicted_velocity = self.velocity_field(
             residual_state=residual_state[:, None],
             reference=matched_reference[:, None],
-            prototypes=matched_reference[:, None],
             time=time,
+            target_token=scene["target_token"],
             scene_tokens=scene["scene_tokens"],
             scene_padding_mask=scene["scene_padding_mask"],
         )[:, 0]
@@ -194,8 +194,8 @@ class StaticAnchorFlowModel(nn.Module):
             return self.velocity_field(
                 residual_state=state,
                 reference=references,
-                prototypes=references,
                 time=time,
+                target_token=scene["target_token"],
                 scene_tokens=scene["scene_tokens"],
                 scene_padding_mask=scene["scene_padding_mask"],
             )

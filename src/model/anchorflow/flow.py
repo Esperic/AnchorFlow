@@ -174,12 +174,12 @@ class AnchorResidualVelocityField(nn.Module):
         self.future_steps = future_steps
         self.embed_dim = embed_dim
         self.residual_encoder = nn.Sequential(
-            nn.Linear(future_steps * 2, embed_dim),
+            nn.Linear(2, embed_dim),
             nn.GELU(),
             nn.Linear(embed_dim, embed_dim),
         )
         self.anchor_encoder = nn.Sequential(
-            nn.Linear(future_steps * 4, embed_dim),
+            nn.Linear(2, embed_dim),
             nn.GELU(),
             nn.Linear(embed_dim, embed_dim),
         )
@@ -189,13 +189,36 @@ class AnchorResidualVelocityField(nn.Module):
             nn.GELU(),
             nn.Linear(embed_dim, embed_dim),
         )
-        self.query_norm = nn.LayerNorm(embed_dim)
+        self.target_encoder = nn.Sequential(
+            nn.LayerNorm(embed_dim),
+            nn.Linear(embed_dim, embed_dim),
+        )
+        self.fusion_projection = nn.Sequential(
+            nn.Linear(embed_dim * 4, embed_dim),
+            nn.GELU(),
+            nn.Linear(embed_dim, embed_dim),
+        )
+        self.temporal_position = nn.Embedding(future_steps, embed_dim)
+        nn.init.normal_(self.temporal_position.weight, std=0.02)
+        hidden_dim = int(embed_dim * mlp_ratio)
+        temporal_layer = nn.TransformerEncoderLayer(
+            d_model=embed_dim,
+            nhead=num_heads,
+            dim_feedforward=hidden_dim,
+            dropout=0.0,
+            activation="gelu",
+            batch_first=True,
+            norm_first=True,
+        )
+        self.temporal_encoder = nn.TransformerEncoder(
+            temporal_layer,
+            num_layers=2,
+        )
         self.cross_attention = nn.MultiheadAttention(
             embed_dim,
             num_heads,
             batch_first=True,
         )
-        hidden_dim = int(embed_dim * mlp_ratio)
         self.output_block = nn.Sequential(
             nn.LayerNorm(embed_dim),
             nn.Linear(embed_dim, hidden_dim),
@@ -203,10 +226,12 @@ class AnchorResidualVelocityField(nn.Module):
             nn.Linear(hidden_dim, embed_dim),
         )
         self.output_norm = nn.LayerNorm(embed_dim)
-        self.velocity_projection = nn.Linear(embed_dim, future_steps * 2)
+        self.velocity_projection = nn.Linear(embed_dim, 2)
+        self.residual_skip = nn.Linear(2, 2, bias=False)
         if zero_init_output:
             nn.init.zeros_(self.velocity_projection.weight)
             nn.init.zeros_(self.velocity_projection.bias)
+            nn.init.zeros_(self.residual_skip.weight)
 
     def _expand_time(
         self,
@@ -227,8 +252,8 @@ class AnchorResidualVelocityField(nn.Module):
         self,
         residual_state: torch.Tensor,
         reference: torch.Tensor,
-        prototypes: torch.Tensor,
         time: torch.Tensor,
+        target_token: torch.Tensor,
         scene_tokens: torch.Tensor,
         scene_padding_mask: torch.Tensor,
     ) -> torch.Tensor:
@@ -240,11 +265,14 @@ class AnchorResidualVelocityField(nn.Module):
             raise ValueError(
                 "residual_state must have shape [B, K, T, 2]"
             )
-        if reference.shape != expected_shape or prototypes.shape != expected_shape:
-            raise ValueError(
-                "reference and prototypes must match residual_state shape"
-            )
+        if reference.shape != expected_shape:
+            raise ValueError("reference must match residual_state shape")
         batch_size, num_modes = residual_state.shape[:2]
+        if target_token.shape != (batch_size, self.embed_dim):
+            raise ValueError(
+                "target_token must have shape [B, D], "
+                f"got {tuple(target_token.shape)}"
+            )
         if scene_tokens.shape[0] != batch_size:
             raise ValueError("scene_tokens batch dimension must match residual_state")
         if scene_tokens.shape[-1] != self.embed_dim:
@@ -252,19 +280,49 @@ class AnchorResidualVelocityField(nn.Module):
         if scene_padding_mask.shape != scene_tokens.shape[:2]:
             raise ValueError("scene_padding_mask must have shape [B, S]")
 
-        flat_residual = residual_state.reshape(batch_size * num_modes, -1)
-        flat_anchors = torch.cat([reference, prototypes], dim=-1).reshape(
-            batch_size * num_modes, -1
+        flat_residual = residual_state.reshape(
+            batch_size * num_modes,
+            self.future_steps,
+            2,
+        )
+        flat_reference = reference.reshape(
+            batch_size * num_modes,
+            self.future_steps,
+            2,
         )
         flat_time = self._expand_time(
             time, batch_size, num_modes
         ).reshape(-1)
-        query = (
-            self.residual_encoder(flat_residual)
-            + self.anchor_encoder(flat_anchors)
-            + self.time_encoder(flat_time)
+        time_embedding = self.time_encoder(flat_time)[:, None].expand(
+            -1,
+            self.future_steps,
+            -1,
         )
-        query = self.query_norm(query).unsqueeze(1)
+        target_embedding = self.target_encoder(target_token)
+        target_embedding = target_embedding[:, None].expand(
+            batch_size,
+            num_modes,
+            self.embed_dim,
+        ).reshape(batch_size * num_modes, self.embed_dim)
+        target_embedding = target_embedding[:, None].expand(
+            -1,
+            self.future_steps,
+            -1,
+        )
+        query = self.fusion_projection(
+            torch.cat(
+                [
+                    self.residual_encoder(flat_residual),
+                    self.anchor_encoder(flat_reference),
+                    time_embedding,
+                    target_embedding,
+                ],
+                dim=-1,
+            )
+        )
+        query = self.temporal_encoder(
+            query + self.temporal_position.weight.unsqueeze(0)
+        )
 
         memory = scene_tokens[:, None].expand(
             batch_size,
@@ -286,9 +344,8 @@ class AnchorResidualVelocityField(nn.Module):
         )
         hidden = query + attended
         hidden = hidden + self.output_block(hidden)
-        velocity = self.velocity_projection(
-            self.output_norm(hidden[:, 0])
-        )
+        velocity = self.velocity_projection(self.output_norm(hidden))
+        velocity = velocity + self.residual_skip(flat_residual)
         return velocity.view(
             batch_size,
             num_modes,

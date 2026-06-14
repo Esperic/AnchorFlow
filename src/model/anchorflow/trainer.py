@@ -49,7 +49,6 @@ class StaticAnchorFlowTrainer(pl.LightningModule):
         weight_decay: float = 1e-4,
     ) -> None:
         super().__init__()
-        del historical_steps
         self._validate_algorithm_config(
             flow_path=flow_path,
             flow_prediction=flow_prediction,
