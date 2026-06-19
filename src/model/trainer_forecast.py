@@ -8,6 +8,7 @@ import torch.nn.functional as F
 from torchmetrics import MetricCollection
 
 from src.metrics import MR, minADE, minFDE
+from src.utils.drift_loss import drift_loss, flatten_trajectories
 from src.utils.optim import WarmupCosLR
 from src.utils.submission_av2 import SubmissionAv2
 
@@ -30,12 +31,14 @@ class Trainer(pl.LightningModule):
         warmup_epochs: int = 10,
         epochs: int = 60,
         weight_decay: float = 1e-4,
+        drift_weight: float = 0.05,
     ) -> None:
         super(Trainer, self).__init__()
         self.warmup_epochs = warmup_epochs
         self.epochs = epochs
         self.lr = lr
         self.weight_decay = weight_decay
+        self.drift_weight = drift_weight
         self.save_hyperparameters()
         self.submission_handler = SubmissionAv2()
 
@@ -90,13 +93,24 @@ class Trainer(pl.LightningModule):
             y_hat_others[others_reg_mask], y_others[others_reg_mask]
         )
 
-        loss = agent_reg_loss + agent_cls_loss + others_reg_loss
+        agent_drift_loss = drift_loss(
+            gen=flatten_trajectories(y_hat),
+            fixed_pos=flatten_trajectories(y),
+        )
+
+        loss = (
+            agent_reg_loss
+            + agent_cls_loss
+            + others_reg_loss
+            + self.drift_weight * agent_drift_loss
+        )
 
         return {
             "loss": loss,
             "reg_loss": agent_reg_loss.item(),
             "cls_loss": agent_cls_loss.item(),
             "others_reg_loss": others_reg_loss.item(),
+            "drift_loss": agent_drift_loss.item(),
         }
 
     def training_step(self, data, batch_idx):

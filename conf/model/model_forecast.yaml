@@ -16,3 +16,4 @@ target:
   weight_decay: ${weight_decay}
   epochs: ${epochs}
   warmup_epochs: ${warmup_epochs}
+  drift_weight: 0.1
