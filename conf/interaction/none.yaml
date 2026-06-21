@@ -1,0 +1,9 @@
+type: none
+radius: 50.0
+max_neighbors: 16
+dropout: 0.1
+num_layers: 2
+stalk_dim: 2
+q: 0.15
+lateral_threshold: 6.0
+ttc_threshold: 5.0

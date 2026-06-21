@@ -11,6 +11,7 @@ from src.metrics import MR, minADE, minFDE
 from src.utils.optim import WarmupCosLR
 from src.utils.submission_av2 import SubmissionAv2
 
+from .loss_utils import safe_smooth_l1_loss
 from .model_forecast import ModelForecast
 
 
@@ -30,6 +31,15 @@ class Trainer(pl.LightningModule):
         warmup_epochs: int = 10,
         epochs: int = 60,
         weight_decay: float = 1e-4,
+        interaction_type: str = "none",
+        interaction_radius: float = 50.0,
+        interaction_max_neighbors: int = 16,
+        interaction_dropout: float = 0.1,
+        interaction_num_layers: int = 2,
+        interaction_stalk_dim: int = 2,
+        interaction_q: float = 0.15,
+        interaction_lateral_threshold: float = 6.0,
+        interaction_ttc_threshold: float = 5.0,
     ) -> None:
         super(Trainer, self).__init__()
         self.warmup_epochs = warmup_epochs
@@ -47,6 +57,15 @@ class Trainer(pl.LightningModule):
             qkv_bias=qkv_bias,
             drop_path=drop_path,
             future_steps=future_steps,
+            interaction_type=interaction_type,
+            interaction_radius=interaction_radius,
+            interaction_max_neighbors=interaction_max_neighbors,
+            interaction_dropout=interaction_dropout,
+            interaction_num_layers=interaction_num_layers,
+            interaction_stalk_dim=interaction_stalk_dim,
+            interaction_q=interaction_q,
+            interaction_lateral_threshold=interaction_lateral_threshold,
+            interaction_ttc_threshold=interaction_ttc_threshold,
         )
 
         if pretrained_weights is not None:
@@ -86,7 +105,7 @@ class Trainer(pl.LightningModule):
         agent_cls_loss = F.cross_entropy(pi, best_mode.detach())
 
         others_reg_mask = ~data["x_padding_mask"][:, 1:, 50:]
-        others_reg_loss = F.smooth_l1_loss(
+        others_reg_loss = safe_smooth_l1_loss(
             y_hat_others[others_reg_mask], y_others[others_reg_mask]
         )
 

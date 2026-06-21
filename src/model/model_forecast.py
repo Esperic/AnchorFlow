@@ -8,6 +8,7 @@ from .layers.agent_embedding import AgentEmbeddingLayer
 from .layers.lane_embedding import LaneEmbeddingLayer
 from .layers.multimodal_decoder import MultimodalDecoder
 from .layers.transformer_blocks import Block
+from .layers.interaction import build_interaction
 
 
 class ModelForecast(nn.Module):
@@ -20,12 +21,33 @@ class ModelForecast(nn.Module):
         qkv_bias=False,
         drop_path=0.2,
         future_steps: int = 60,
+        interaction_type: str = "none",
+        interaction_radius: float = 50.0,
+        interaction_max_neighbors: int = 16,
+        interaction_dropout: float = 0.1,
+        interaction_num_layers: int = 2,
+        interaction_stalk_dim: int = 2,
+        interaction_q: float = 0.15,
+        interaction_lateral_threshold: float = 6.0,
+        interaction_ttc_threshold: float = 5.0,
     ) -> None:
         super().__init__()
         self.hist_embed = AgentEmbeddingLayer(
             4, embed_dim // 4, drop_path_rate=drop_path
         )
         self.lane_embed = LaneEmbeddingLayer(3, embed_dim)
+        self.interaction = build_interaction(
+            interaction_type=interaction_type,
+            embed_dim=embed_dim,
+            radius=interaction_radius,
+            max_neighbors=interaction_max_neighbors,
+            dropout=interaction_dropout,
+            num_layers=interaction_num_layers,
+            stalk_dim=interaction_stalk_dim,
+            q=interaction_q,
+            lateral_threshold=interaction_lateral_threshold,
+            ttc_threshold=interaction_ttc_threshold,
+        )
 
         self.pos_embed = nn.Sequential(
             nn.Linear(4, embed_dim),
@@ -55,6 +77,11 @@ class ModelForecast(nn.Module):
         )
 
         self.initialize_weights()
+        reset_interaction = getattr(
+            self.interaction, "reset_output_projection", None
+        )
+        if reset_interaction is not None:
+            reset_interaction()
 
     def initialize_weights(self):
         nn.init.normal_(self.actor_type_embed, std=0.02)
@@ -121,6 +148,18 @@ class ModelForecast(nn.Module):
         lane_type_embed = self.lane_type_embed.repeat(B, M, 1)
         actor_feat += actor_type_embed
         lane_feat += lane_type_embed
+
+        velocity = data.get("x_velocity")
+        if velocity is None:
+            velocity = torch.zeros_like(data["x_angles"])
+        actor_feat = self.interaction(
+            actor_feat,
+            data["x_centers"],
+            data["x_angles"][:, :, 49],
+            data["x_key_padding_mask"],
+            data["x_attr"],
+            velocity[:, :, 49],
+        )
 
         x_encoder = torch.cat([actor_feat, lane_feat], dim=1)
         key_padding_mask = torch.cat(

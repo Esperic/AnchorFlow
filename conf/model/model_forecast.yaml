@@ -16,3 +16,12 @@ target:
   weight_decay: ${weight_decay}
   epochs: ${epochs}
   warmup_epochs: ${warmup_epochs}
+  interaction_type: ${interaction.type}
+  interaction_radius: ${interaction.radius}
+  interaction_max_neighbors: ${interaction.max_neighbors}
+  interaction_dropout: ${interaction.dropout}
+  interaction_num_layers: ${interaction.num_layers}
+  interaction_stalk_dim: ${interaction.stalk_dim}
+  interaction_q: ${interaction.q}
+  interaction_lateral_threshold: ${interaction.lateral_threshold}
+  interaction_ttc_threshold: ${interaction.ttc_threshold}

@@ -1,0 +1,5 @@
+defaults:
+  - none
+  - _self_
+
+type: directed_hypergraph
