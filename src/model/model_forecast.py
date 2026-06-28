@@ -20,8 +20,16 @@ class ModelForecast(nn.Module):
         qkv_bias=False,
         drop_path=0.2,
         future_steps: int = 60,
+        num_modes: int = 6,
+        gmn_path: str = None,
+        gmn_sampling: str = "query_aligned",
+        gmn_std_scale: float = 1.0,
+        gmn_min_std: float = 1e-3,
+        gmn_latent_dim: int = 16,
+        gmn_temperature: float = 1.0,
     ) -> None:
         super().__init__()
+        self.future_steps = future_steps
         self.hist_embed = AgentEmbeddingLayer(
             4, embed_dim // 4, drop_path_rate=drop_path
         )
@@ -49,7 +57,17 @@ class ModelForecast(nn.Module):
         self.actor_type_embed = nn.Parameter(torch.Tensor(4, embed_dim))
         self.lane_type_embed = nn.Parameter(torch.Tensor(1, 1, embed_dim))
 
-        self.decoder = MultimodalDecoder(embed_dim, future_steps)
+        self.decoder = MultimodalDecoder(
+            embed_dim,
+            future_steps,
+            num_modes=num_modes,
+            gmn_path=gmn_path,
+            gmn_sampling=gmn_sampling,
+            gmn_std_scale=gmn_std_scale,
+            gmn_min_std=gmn_min_std,
+            gmn_latent_dim=gmn_latent_dim,
+            gmn_temperature=gmn_temperature,
+        )
         self.dense_predictor = nn.Sequential(
             nn.Linear(embed_dim, 256), nn.ReLU(), nn.Linear(256, future_steps * 2)
         )
@@ -136,7 +154,7 @@ class ModelForecast(nn.Module):
         y_hat, pi = self.decoder(x_agent)
 
         x_others = x_encoder[:, 1:N]
-        y_hat_others = self.dense_predictor(x_others).view(B, -1, 60, 2)
+        y_hat_others = self.dense_predictor(x_others).view(B, -1, self.future_steps, 2)
 
         return {
             "y_hat": y_hat,

@@ -9,6 +9,11 @@ from torchmetrics import MetricCollection
 
 from src.metrics import MR, minADE, minFDE
 from src.utils.drift_loss import drift_loss, flatten_trajectories
+from src.utils.drifttraj_loss import (
+    endpoint_diversity_loss,
+    select_nearest_mode,
+    split_winner_and_others,
+)
 from src.utils.optim import WarmupCosLR
 from src.utils.submission_av2 import SubmissionAv2
 
@@ -26,12 +31,22 @@ class Trainer(pl.LightningModule):
         mlp_ratio=4.0,
         qkv_bias=False,
         drop_path=0.2,
+        num_modes: int = 6,
         pretrained_weights: str = None,
         lr: float = 1e-3,
         warmup_epochs: int = 10,
         epochs: int = 60,
         weight_decay: float = 1e-4,
-        drift_weight: float = 0.05,
+        drift_weight: float = 1.0,
+        l1_weight: float = 1.0,
+        diversity_weight: float = 0.1,
+        diversity_sigma: float = 2.0,
+        gmn_path: str = None,
+        gmn_sampling: str = "query_aligned",
+        gmn_std_scale: float = 1.0,
+        gmn_min_std: float = 1e-3,
+        gmn_latent_dim: int = 16,
+        gmn_temperature: float = 1.0,
     ) -> None:
         super(Trainer, self).__init__()
         self.warmup_epochs = warmup_epochs
@@ -39,6 +54,9 @@ class Trainer(pl.LightningModule):
         self.lr = lr
         self.weight_decay = weight_decay
         self.drift_weight = drift_weight
+        self.l1_weight = l1_weight
+        self.diversity_weight = diversity_weight
+        self.diversity_sigma = diversity_sigma
         self.save_hyperparameters()
         self.submission_handler = SubmissionAv2()
 
@@ -50,6 +68,13 @@ class Trainer(pl.LightningModule):
             qkv_bias=qkv_bias,
             drop_path=drop_path,
             future_steps=future_steps,
+            num_modes=num_modes,
+            gmn_path=gmn_path,
+            gmn_sampling=gmn_sampling,
+            gmn_std_scale=gmn_std_scale,
+            gmn_min_std=gmn_min_std,
+            gmn_latent_dim=gmn_latent_dim,
+            gmn_temperature=gmn_temperature,
         )
 
         if pretrained_weights is not None:
@@ -78,39 +103,33 @@ class Trainer(pl.LightningModule):
         return predictions, prob
 
     def cal_loss(self, out, data):
-        y_hat, pi, y_hat_others = out["y_hat"], out["pi"], out["y_hat_others"]
-        y, y_others = data["y"][:, 0], data["y"][:, 1:]
+        y_hat, pi = out["y_hat"], out["pi"]
+        y = data["y"][:, 0]
 
-        l2_norm = torch.norm(y_hat[..., :2] - y.unsqueeze(1), dim=-1).sum(dim=-1)
-        best_mode = torch.argmin(l2_norm, dim=-1)
-        y_hat_best = y_hat[torch.arange(y_hat.shape[0]), best_mode]
+        best_mode, batch_ids = select_nearest_mode(y_hat, y)
+        best_pred, other_pred = split_winner_and_others(y_hat, best_mode, batch_ids)
 
-        agent_reg_loss = F.smooth_l1_loss(y_hat_best[..., :2], y)
-        agent_cls_loss = F.cross_entropy(pi, best_mode.detach())
-
-        others_reg_mask = ~data["x_padding_mask"][:, 1:, 50:]
-        others_reg_loss = F.smooth_l1_loss(
-            y_hat_others[others_reg_mask], y_others[others_reg_mask]
-        )
-
-        agent_drift_loss = drift_loss(
-            gen=flatten_trajectories(y_hat),
+        loss_drift = drift_loss(
+            gen=flatten_trajectories(best_pred),
             fixed_pos=flatten_trajectories(y),
+            fixed_neg=flatten_trajectories(other_pred),
         )
+        loss_l1 = F.smooth_l1_loss(best_pred.squeeze(1), y)
+        loss_div = endpoint_diversity_loss(y_hat, sigma=self.diversity_sigma)
+        cls_loss = F.cross_entropy(pi, best_mode.detach())
 
         loss = (
-            agent_reg_loss
-            + agent_cls_loss
-            + others_reg_loss
-            + self.drift_weight * agent_drift_loss
+            self.drift_weight * loss_drift
+            + self.l1_weight * loss_l1
+            + self.diversity_weight * loss_div
         )
 
         return {
             "loss": loss,
-            "reg_loss": agent_reg_loss.item(),
-            "cls_loss": agent_cls_loss.item(),
-            "others_reg_loss": others_reg_loss.item(),
-            "drift_loss": agent_drift_loss.item(),
+            "reg_loss": loss_l1.item(),
+            "cls_loss": cls_loss.item(),
+            "drift_loss": loss_drift.item(),
+            "diversity_loss": loss_div.item(),
         }
 
     def training_step(self, data, batch_idx):
