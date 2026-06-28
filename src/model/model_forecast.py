@@ -6,7 +6,7 @@ import torch.nn.functional as F
 
 from .layers.agent_embedding import AgentEmbeddingLayer
 from .layers.lane_embedding import LaneEmbeddingLayer
-from .layers.multimodal_decoder import MultimodalDecoder
+from .layers.drift_gmn_decoder import DriftGmnDecoder
 from .layers.transformer_blocks import Block
 
 
@@ -27,6 +27,9 @@ class ModelForecast(nn.Module):
         gmn_min_std: float = 1e-3,
         gmn_latent_dim: int = 16,
         gmn_temperature: float = 1.0,
+        decoder_depth: int = 2,
+        decoder_dim_feedforward: int = 2048,
+        decoder_dropout: float = 0.1,
     ) -> None:
         super().__init__()
         self.future_steps = future_steps
@@ -57,10 +60,14 @@ class ModelForecast(nn.Module):
         self.actor_type_embed = nn.Parameter(torch.Tensor(4, embed_dim))
         self.lane_type_embed = nn.Parameter(torch.Tensor(1, 1, embed_dim))
 
-        self.decoder = MultimodalDecoder(
-            embed_dim,
-            future_steps,
+        self.decoder = DriftGmnDecoder(
+            embed_dim=embed_dim,
+            future_steps=future_steps,
             num_modes=num_modes,
+            num_heads=num_heads,
+            decoder_depth=decoder_depth,
+            dim_feedforward=decoder_dim_feedforward,
+            dropout=decoder_dropout,
             gmn_path=gmn_path,
             gmn_sampling=gmn_sampling,
             gmn_std_scale=gmn_std_scale,
@@ -150,8 +157,10 @@ class ModelForecast(nn.Module):
             x_encoder = blk(x_encoder, key_padding_mask=key_padding_mask)
         x_encoder = self.norm(x_encoder)
 
-        x_agent = x_encoder[:, 0]
-        y_hat, pi = self.decoder(x_agent)
+        y_hat, pi = self.decoder(
+            memory=x_encoder,
+            memory_key_padding_mask=key_padding_mask,
+        )
 
         x_others = x_encoder[:, 1:N]
         y_hat_others = self.dense_predictor(x_others).view(B, -1, self.future_steps, 2)

@@ -17,7 +17,7 @@ target:
   weight_decay: ${weight_decay}
   epochs: ${epochs}
   warmup_epochs: ${warmup_epochs}
-  drift_weight: 1.0
+  drift_weight: 0.1
   l1_weight: 1.0
   diversity_weight: 0.1
   diversity_sigma: 2.0
@@ -27,3 +27,6 @@ target:
   gmn_min_std: 0.001
   gmn_latent_dim: 16
   gmn_temperature: 1.0
+  decoder_depth: 2
+  decoder_dim_feedforward: 2048
+  decoder_dropout: 0.1

@@ -47,6 +47,9 @@ class Trainer(pl.LightningModule):
         gmn_min_std: float = 1e-3,
         gmn_latent_dim: int = 16,
         gmn_temperature: float = 1.0,
+        decoder_depth: int = 2,
+        decoder_dim_feedforward: int = 2048,
+        decoder_dropout: float = 0.1,
     ) -> None:
         super(Trainer, self).__init__()
         self.warmup_epochs = warmup_epochs
@@ -75,6 +78,9 @@ class Trainer(pl.LightningModule):
             gmn_min_std=gmn_min_std,
             gmn_latent_dim=gmn_latent_dim,
             gmn_temperature=gmn_temperature,
+            decoder_depth=decoder_depth,
+            decoder_dim_feedforward=decoder_dim_feedforward,
+            decoder_dropout=decoder_dropout,
         )
 
         if pretrained_weights is not None:
