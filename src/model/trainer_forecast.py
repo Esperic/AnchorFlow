@@ -103,8 +103,8 @@ class Trainer(pl.LightningModule):
         return predictions, prob
 
     def cal_loss(self, out, data):
-        y_hat, pi = out["y_hat"], out["pi"]
-        y = data["y"][:, 0]
+        y_hat, pi, y_hat_others = out["y_hat"], out["pi"], out["y_hat_others"]
+        y, y_others = data["y"][:, 0], data["y"][:, 1:]
 
         best_mode, batch_ids = select_nearest_mode(y_hat, y)
         best_pred, other_pred = split_winner_and_others(y_hat, best_mode, batch_ids)
@@ -117,17 +117,25 @@ class Trainer(pl.LightningModule):
         loss_l1 = F.smooth_l1_loss(best_pred.squeeze(1), y)
         loss_div = endpoint_diversity_loss(y_hat, sigma=self.diversity_sigma)
         cls_loss = F.cross_entropy(pi, best_mode.detach())
+        others_reg_mask = ~data["x_padding_mask"][:, 1:, 50:]
+        others_reg_loss = F.smooth_l1_loss(
+            y_hat_others[others_reg_mask],
+            y_others[others_reg_mask],
+        )
 
         loss = (
             self.drift_weight * loss_drift
             + self.l1_weight * loss_l1
             + self.diversity_weight * loss_div
+            + cls_loss
+            + others_reg_loss
         )
 
         return {
             "loss": loss,
             "reg_loss": loss_l1.item(),
             "cls_loss": cls_loss.item(),
+            "others_reg_loss": others_reg_loss.item(),
             "drift_loss": loss_drift.item(),
             "diversity_loss": loss_div.item(),
         }
