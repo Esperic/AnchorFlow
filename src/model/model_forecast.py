@@ -6,6 +6,7 @@ import torch.nn.functional as F
 
 from .layers.agent_embedding import AgentEmbeddingLayer
 from .layers.lane_embedding import LaneEmbeddingLayer
+from .layers.mrgd import ModeDeltaLinear
 from .layers.multimodal_decoder import MultimodalDecoder
 from .layers.transformer_blocks import Block
 
@@ -20,6 +21,9 @@ class ModelForecast(nn.Module):
         qkv_bias=False,
         drop_path=0.2,
         future_steps: int = 60,
+        num_modes: int = 6,
+        use_mrgd: bool = False,
+        mrgd_delta_scale: float = 1.0,
     ) -> None:
         super().__init__()
         self.hist_embed = AgentEmbeddingLayer(
@@ -49,7 +53,13 @@ class ModelForecast(nn.Module):
         self.actor_type_embed = nn.Parameter(torch.Tensor(4, embed_dim))
         self.lane_type_embed = nn.Parameter(torch.Tensor(1, 1, embed_dim))
 
-        self.decoder = MultimodalDecoder(embed_dim, future_steps)
+        self.decoder = MultimodalDecoder(
+            embed_dim,
+            future_steps,
+            num_modes=num_modes,
+            use_mrgd=use_mrgd,
+            mrgd_delta_scale=mrgd_delta_scale,
+        )
         self.dense_predictor = nn.Sequential(
             nn.Linear(embed_dim, 256), nn.ReLU(), nn.Linear(256, future_steps * 2)
         )
@@ -66,6 +76,10 @@ class ModelForecast(nn.Module):
         if isinstance(m, nn.Linear):
             torch.nn.init.xavier_uniform_(m.weight)
             if isinstance(m, nn.Linear) and m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+        elif isinstance(m, ModeDeltaLinear):
+            torch.nn.init.xavier_uniform_(m.weight)
+            if m.bias is not None:
                 nn.init.constant_(m.bias, 0)
         elif isinstance(m, nn.LayerNorm):
             nn.init.constant_(m.bias, 0)

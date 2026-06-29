@@ -16,3 +16,9 @@ target:
   weight_decay: ${weight_decay}
   epochs: ${epochs}
   warmup_epochs: ${warmup_epochs}
+  use_mrgd: ${use_mrgd}
+  mrgd_route_grad: ${mrgd_route_grad}
+  mrgd_warmup_epochs: ${mrgd_warmup_epochs}
+  mrgd_residual_scale: ${mrgd_residual_scale}
+  mrgd_consensus: ${mrgd_consensus}
+  mrgd_log_interval: ${mrgd_log_interval}

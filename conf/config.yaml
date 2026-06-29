@@ -19,6 +19,12 @@ sync_bn: true
 batch_size: 32
 epochs: 60
 warmup_epochs: 10
+use_mrgd: false
+mrgd_route_grad: true
+mrgd_warmup_epochs: 5
+mrgd_residual_scale: 1.0
+mrgd_consensus: mean
+mrgd_log_interval: 50
 
 # optimizer
 lr: 0.001
