@@ -113,12 +113,11 @@ class Trainer(pl.LightningModule):
         y, y_others = data["y"][:, 0], data["y"][:, 1:]
 
         best_mode, batch_ids = select_nearest_mode(y_hat, y)
-        best_pred, other_pred = split_winner_and_others(y_hat, best_mode, batch_ids)
+        best_pred, _ = split_winner_and_others(y_hat, best_mode, batch_ids)
 
         loss_drift = drift_loss(
-            gen=flatten_trajectories(best_pred),
+            gen=flatten_trajectories(y_hat),
             fixed_pos=flatten_trajectories(y),
-            fixed_neg=flatten_trajectories(other_pred),
         )
         loss_l1 = F.smooth_l1_loss(best_pred.squeeze(1), y)
         loss_div = endpoint_diversity_loss(y_hat, sigma=self.diversity_sigma)
