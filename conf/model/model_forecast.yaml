@@ -22,3 +22,5 @@ target:
   mrgd_residual_scale: ${mrgd_residual_scale}
   mrgd_consensus: ${mrgd_consensus}
   mrgd_log_interval: ${mrgd_log_interval}
+  gradient_clip_val: ${gradient_clip_val}
+  gradient_clip_algorithm: ${gradient_clip_algorithm}

@@ -13,6 +13,12 @@ from pytorch_lightning.callbacks import (
 from pytorch_lightning.loggers import TensorBoardLogger, WandbLogger
 
 
+def resolve_trainer_gradient_clip_val(conf):
+    if getattr(conf, "use_mrgd", False):
+        return None
+    return conf.gradient_clip_val
+
+
 @hydra.main(version_base=None, config_path="conf", config_name="config")
 def main(conf):
     pl.seed_everything(conf.seed, workers=True)
@@ -45,7 +51,7 @@ def main(conf):
 
     trainer = pl.Trainer(
         logger=logger,
-        gradient_clip_val=conf.gradient_clip_val,
+        gradient_clip_val=resolve_trainer_gradient_clip_val(conf),
         gradient_clip_algorithm=conf.gradient_clip_algorithm,
         max_epochs=conf.epochs,
         accelerator="gpu",

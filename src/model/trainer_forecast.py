@@ -37,6 +37,8 @@ class Trainer(pl.LightningModule):
         mrgd_residual_scale: float = 1.0,
         mrgd_consensus: str = "mean",
         mrgd_log_interval: int = 50,
+        gradient_clip_val: float = 0.0,
+        gradient_clip_algorithm: str = "norm",
     ) -> None:
         super(Trainer, self).__init__()
         self.warmup_epochs = warmup_epochs
@@ -49,6 +51,8 @@ class Trainer(pl.LightningModule):
         self.mrgd_residual_scale = mrgd_residual_scale
         self.mrgd_consensus = mrgd_consensus
         self.mrgd_log_interval = mrgd_log_interval
+        self.manual_gradient_clip_val = gradient_clip_val
+        self.manual_gradient_clip_algorithm = gradient_clip_algorithm
         if self.use_mrgd:
             self.automatic_optimization = False
         self.save_hyperparameters()
@@ -381,13 +385,14 @@ class Trainer(pl.LightningModule):
         if use_routing_now and shared_grads is not None:
             self.apply_mrgd_grads(pairs, shared_grads, private_grads)
 
-        trainer = getattr(self, "trainer", None)
-        gradient_clip_val = getattr(trainer, "gradient_clip_val", None)
-        if gradient_clip_val is not None and gradient_clip_val > 0:
+        if (
+            self.manual_gradient_clip_val is not None
+            and self.manual_gradient_clip_val > 0
+        ):
             self.clip_gradients(
                 opt,
-                gradient_clip_val=gradient_clip_val,
-                gradient_clip_algorithm=trainer.gradient_clip_algorithm,
+                gradient_clip_val=self.manual_gradient_clip_val,
+                gradient_clip_algorithm=self.manual_gradient_clip_algorithm,
             )
 
         opt.step()
