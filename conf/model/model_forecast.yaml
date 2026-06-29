@@ -22,5 +22,7 @@ target:
   mrgd_residual_scale: ${mrgd_residual_scale}
   mrgd_consensus: ${mrgd_consensus}
   mrgd_log_interval: ${mrgd_log_interval}
+  mrgd_count_weight_private: ${mrgd_count_weight_private}
+  mrgd_freeze_delta_warmup: ${mrgd_freeze_delta_warmup}
   gradient_clip_val: ${gradient_clip_val}
   gradient_clip_algorithm: ${gradient_clip_algorithm}

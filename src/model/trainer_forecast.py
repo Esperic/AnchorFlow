@@ -37,6 +37,8 @@ class Trainer(pl.LightningModule):
         mrgd_residual_scale: float = 1.0,
         mrgd_consensus: str = "mean",
         mrgd_log_interval: int = 50,
+        mrgd_count_weight_private: bool = True,
+        mrgd_freeze_delta_warmup: bool = True,
         gradient_clip_val: float = 0.0,
         gradient_clip_algorithm: str = "norm",
     ) -> None:
@@ -51,6 +53,8 @@ class Trainer(pl.LightningModule):
         self.mrgd_residual_scale = mrgd_residual_scale
         self.mrgd_consensus = mrgd_consensus
         self.mrgd_log_interval = mrgd_log_interval
+        self.mrgd_count_weight_private = mrgd_count_weight_private
+        self.mrgd_freeze_delta_warmup = mrgd_freeze_delta_warmup
         self.manual_gradient_clip_val = gradient_clip_val
         self.manual_gradient_clip_algorithm = gradient_clip_algorithm
         if self.use_mrgd:
@@ -222,7 +226,10 @@ class Trainer(pl.LightningModule):
             private_grad = torch.zeros_like(pair["private"])
             for mode_idx in valid_modes:
                 residual = grads_by_mode[mode_idx][pair_idx] - shared_grads[pair_idx]
-                private_grad[mode_idx] = self.mrgd_residual_scale * residual
+                private_weight = weights[mode_idx] if self.mrgd_count_weight_private else 1.0
+                private_grad[mode_idx] = (
+                    self.mrgd_residual_scale * private_weight * residual
+                )
             private_grads.append(private_grad.detach())
 
         mean_pair_cos = 0.0
@@ -264,6 +271,15 @@ class Trainer(pl.LightningModule):
         for pair, shared_grad, private_grad in zip(pairs, shared_grads, private_grads):
             pair["shared"].grad = shared_grad.clone()
             pair["private"].grad = private_grad.clone()
+
+    def clear_mrgd_delta_grads(self):
+        if not hasattr(self.net.decoder, "get_mrgd_layers"):
+            return
+
+        for layer in self.net.decoder.get_mrgd_layers():
+            layer.delta_weight.grad = None
+            if layer.delta_bias is not None:
+                layer.delta_bias.grad = None
 
     def compute_diversity_metrics(self, out):
         y_hat = out["y_hat"]
@@ -382,7 +398,14 @@ class Trainer(pl.LightningModule):
             }
 
         self.manual_backward(total_loss)
-        if use_routing_now and shared_grads is not None:
+        if (
+            self.use_mrgd
+            and self.mrgd_route_grad
+            and self.mrgd_freeze_delta_warmup
+            and not use_routing_now
+        ):
+            self.clear_mrgd_delta_grads()
+        elif use_routing_now and shared_grads is not None:
             self.apply_mrgd_grads(pairs, shared_grads, private_grads)
 
         if (

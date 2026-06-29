@@ -25,6 +25,8 @@ mrgd_warmup_epochs: 5
 mrgd_residual_scale: 1.0
 mrgd_consensus: mean
 mrgd_log_interval: 50
+mrgd_count_weight_private: true
+mrgd_freeze_delta_warmup: true
 
 # optimizer
 lr: 0.001
