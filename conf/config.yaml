@@ -4,7 +4,7 @@ defaults:
   - model: model_forecast
 
 seed: 2333
-monitor: val_loss
+monitor: val_minFDE6
 save_top_k: 10
 
 data_root:

@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytorch_lightning as pl
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 from torchmetrics import MetricCollection
@@ -272,6 +273,21 @@ class Trainer(pl.LightningModule):
             pair["shared"].grad = shared_grad.clone()
             pair["private"].grad = private_grad.clone()
 
+    def sync_mrgd_grads(self, shared_grads, private_grads):
+        if not (dist.is_available() and dist.is_initialized()):
+            return shared_grads, private_grads
+
+        world_size = dist.get_world_size()
+        if world_size <= 1:
+            return shared_grads, private_grads
+
+        for grads in (shared_grads, private_grads):
+            for grad in grads:
+                dist.all_reduce(grad, op=dist.ReduceOp.SUM)
+                grad.div_(world_size)
+
+        return shared_grads, private_grads
+
     def clear_mrgd_delta_grads(self):
         if not hasattr(self.net.decoder, "get_mrgd_layers"):
             return
@@ -406,6 +422,9 @@ class Trainer(pl.LightningModule):
         ):
             self.clear_mrgd_delta_grads()
         elif use_routing_now and shared_grads is not None:
+            shared_grads, private_grads = self.sync_mrgd_grads(
+                shared_grads, private_grads
+            )
             self.apply_mrgd_grads(pairs, shared_grads, private_grads)
 
         if (
