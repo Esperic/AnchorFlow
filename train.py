@@ -49,19 +49,22 @@ def main(conf):
         LearningRateMonitor(logging_interval="epoch"),
     ]
 
-    trainer = pl.Trainer(
-        logger=logger,
-        gradient_clip_val=resolve_trainer_gradient_clip_val(conf),
-        gradient_clip_algorithm=conf.gradient_clip_algorithm,
-        max_epochs=conf.epochs,
-        accelerator="gpu",
-        devices=conf.gpus,
-        strategy="ddp_find_unused_parameters_false" if conf.gpus > 1 else None,
-        callbacks=callbacks,
-        limit_train_batches=conf.limit_train_batches,
-        limit_val_batches=conf.limit_val_batches,
-        sync_batchnorm=conf.sync_bn,
-    )
+    trainer_kwargs = {
+        "logger": logger,
+        "gradient_clip_val": resolve_trainer_gradient_clip_val(conf),
+        "gradient_clip_algorithm": conf.gradient_clip_algorithm,
+        "max_epochs": conf.epochs,
+        "accelerator": "gpu",
+        "devices": conf.gpus,
+        "callbacks": callbacks,
+        "limit_train_batches": conf.limit_train_batches,
+        "limit_val_batches": conf.limit_val_batches,
+        "sync_batchnorm": conf.sync_bn,
+    }
+    if conf.gpus > 1:
+        trainer_kwargs["strategy"] = "ddp_find_unused_parameters_false"
+
+    trainer = pl.Trainer(**trainer_kwargs)
 
     model = instantiate(conf.model.target)
     datamodule = instantiate(conf.datamodule)
