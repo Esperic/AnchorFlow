@@ -23,12 +23,9 @@ warmup_epochs: 10
 # optimizer
 lr: 0.001
 weight_decay: 1e-4
-head_lr_scale: 3.3333333333333335
-fde_loss_weight: 0.5
-cls_temperature: 1.0
-mr_loss_weight: 0.1
-other_loss_weight: 0.25
-miss_threshold: 2.0
+winner_fde_weight: 1.0
+endpoint_reg_weight: 1.0
+other_loss_weight: 1.0
 probability_temperature: 1.0
 gradient_clip_val: 5
 gradient_clip_algorithm: norm

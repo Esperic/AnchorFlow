@@ -29,12 +29,9 @@ class Trainer(pl.LightningModule):
         warmup_epochs: int = 10,
         epochs: int = 60,
         weight_decay: float = 1e-4,
-        fde_loss_weight: float = 0.5,
-        cls_temperature: float = 1.0,
-        mr_loss_weight: float = 0.1,
-        other_loss_weight: float = 0.25,
-        miss_threshold: float = 2.0,
-        head_lr_scale: float = 10 / 3,
+        winner_fde_weight: float = 1.0,
+        endpoint_reg_weight: float = 1.0,
+        other_loss_weight: float = 1.0,
         probability_temperature: float = 1.0,
     ) -> None:
         super(Trainer, self).__init__()
@@ -42,15 +39,14 @@ class Trainer(pl.LightningModule):
         self.epochs = epochs
         self.lr = lr
         self.weight_decay = weight_decay
-        self.fde_loss_weight = fde_loss_weight
-        self.cls_temperature = cls_temperature
-        self.mr_loss_weight = mr_loss_weight
+        self.winner_fde_weight = winner_fde_weight
+        self.endpoint_reg_weight = endpoint_reg_weight
         self.other_loss_weight = other_loss_weight
-        self.miss_threshold = miss_threshold
-        self.head_lr_scale = head_lr_scale
         self.probability_temperature = probability_temperature
-        if cls_temperature <= 0 or probability_temperature <= 0:
-            raise ValueError("temperatures must be positive")
+        if min(winner_fde_weight, endpoint_reg_weight, other_loss_weight) < 0:
+            raise ValueError("loss weights must be non-negative")
+        if probability_temperature <= 0:
+            raise ValueError("probability_temperature must be positive")
         self.save_hyperparameters()
         self.submission_handler = SubmissionAv2()
 
@@ -101,17 +97,19 @@ class Trainer(pl.LightningModule):
         displacement = torch.norm(y_hat[..., :2] - y.unsqueeze(1), dim=-1)
         ade = displacement.mean(-1)
         fde = displacement[..., -1]
-        quality = ade + self.fde_loss_weight * fde
+        quality = ade + self.winner_fde_weight * fde
         best_mode = quality.argmin(-1)
+        batch_index = torch.arange(y_hat.shape[0], device=y_hat.device)
+        y_hat_best = y_hat[batch_index, best_mode]
 
-        agent_reg_loss = quality.gather(-1, best_mode.unsqueeze(-1)).mean()
-        target_probability = torch.softmax(
-            -quality.detach() / self.cls_temperature, dim=-1
+        trajectory_reg_loss = F.smooth_l1_loss(y_hat_best[..., :2], y)
+        endpoint_reg_loss = F.smooth_l1_loss(
+            y_hat_best[..., -1, :2], y[..., -1, :2]
         )
-        agent_cls_loss = -(
-            target_probability * torch.log_softmax(pi, dim=-1)
-        ).sum(-1).mean()
-        mr_loss = torch.relu(fde.min(-1).values - self.miss_threshold).mean()
+        agent_reg_loss = (
+            trajectory_reg_loss + self.endpoint_reg_weight * endpoint_reg_loss
+        )
+        agent_cls_loss = F.cross_entropy(pi, best_mode.detach())
 
         others_reg_mask = ~data["x_padding_mask"][:, 1:, 50:]
         if others_reg_mask.any():
@@ -124,15 +122,15 @@ class Trainer(pl.LightningModule):
         loss = (
             agent_reg_loss
             + agent_cls_loss
-            + self.mr_loss_weight * mr_loss
             + self.other_loss_weight * others_reg_loss
         )
 
         return {
             "loss": loss,
             "reg_loss": agent_reg_loss.item(),
+            "trajectory_reg_loss": trajectory_reg_loss.item(),
+            "endpoint_reg_loss": endpoint_reg_loss.item(),
             "cls_loss": agent_cls_loss.item(),
-            "mr_loss": mr_loss.item(),
             "others_reg_loss": others_reg_loss.item(),
         }
 
@@ -228,32 +226,16 @@ class Trainer(pl.LightningModule):
         assert len(inter_params) == 0
         assert len(param_dict.keys() - union_params) == 0
 
-        optim_groups = []
-        for names, weight_decay in (
-            (decay, self.weight_decay),
-            (no_decay, 0.0),
-        ):
-            for is_head, lr_scale in (
-                (False, 1.0),
-                (True, self.head_lr_scale),
-            ):
-                group_names = [
-                    name
-                    for name in sorted(names)
-                    if (
-                        name.startswith("net.decoder.")
-                        or name.startswith("net.dense_predictor.")
-                    )
-                    == is_head
-                ]
-                if group_names:
-                    optim_groups.append(
-                        {
-                            "params": [param_dict[name] for name in group_names],
-                            "weight_decay": weight_decay,
-                            "lr_scale": lr_scale,
-                        }
-                    )
+        optim_groups = [
+            {
+                "params": [param_dict[name] for name in sorted(decay)],
+                "weight_decay": self.weight_decay,
+            },
+            {
+                "params": [param_dict[name] for name in sorted(no_decay)],
+                "weight_decay": 0.0,
+            },
+        ]
 
         optimizer = torch.optim.AdamW(
             optim_groups, lr=self.lr, weight_decay=self.weight_decay

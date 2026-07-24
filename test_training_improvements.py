@@ -1,5 +1,4 @@
 import importlib
-import math
 import sys
 import tempfile
 import types
@@ -14,7 +13,7 @@ from calibrate_temperature import brier_min_fde_at_temperatures
 
 
 class TrainingImprovementsTest(unittest.TestCase):
-    def test_metric_aligned_loss_handles_empty_other_agents(self):
+    def test_sharp_style_loss_handles_empty_other_agents(self):
         lightning = types.ModuleType("pytorch_lightning")
         lightning.LightningModule = torch.nn.Module
         torchmetrics = types.ModuleType("torchmetrics")
@@ -39,17 +38,18 @@ class TrainingImprovementsTest(unittest.TestCase):
 
         trainer = trainer_module.Trainer.__new__(trainer_module.Trainer)
         torch.nn.Module.__init__(trainer)
-        trainer.fde_loss_weight = 0.5
-        trainer.cls_temperature = 1.0
-        trainer.mr_loss_weight = 0.1
-        trainer.other_loss_weight = 0.25
-        trainer.miss_threshold = 2.0
+        trainer.winner_fde_weight = 1.0
+        trainer.endpoint_reg_weight = 1.0
+        trainer.other_loss_weight = 1.0
 
-        y_hat = torch.full((1, 6, 2, 2), 2.0)
-        y_hat[:, 0] = 0
+        y_hat = torch.full((1, 6, 2, 2), 10.0)
+        y_hat[:, 0, 0] = 0
+        y_hat[:, 0, 1] = torch.tensor([2.0, 0.0])
+        y_hat[:, 1, :, 0] = 1
+        y_hat[:, 1, :, 1] = 0
         outputs = {
             "y_hat": y_hat,
-            "pi": torch.zeros(1, 6),
+            "pi": torch.tensor([[0.0, 2.0, 0.0, 0.0, 0.0, 0.0]]),
             "y_hat_others": torch.empty(1, 0, 2, 2),
         }
         data = {
@@ -58,25 +58,35 @@ class TrainingImprovementsTest(unittest.TestCase):
         }
 
         losses = trainer.cal_loss(outputs, data)
+        expected_cls_loss = torch.nn.functional.cross_entropy(
+            outputs["pi"], torch.tensor([1])
+        )
 
         self.assertTrue(torch.isfinite(losses["loss"]))
-        self.assertAlmostEqual(losses["loss"].item(), math.log(6), places=6)
+        self.assertAlmostEqual(losses["trajectory_reg_loss"], 0.25)
+        self.assertAlmostEqual(losses["endpoint_reg_loss"], 0.25)
+        self.assertAlmostEqual(losses["reg_loss"], 0.5)
+        self.assertAlmostEqual(losses["cls_loss"], expected_cls_loss.item())
+        self.assertAlmostEqual(
+            losses["loss"].item(), 0.5 + expected_cls_loss.item(), places=6
+        )
         self.assertEqual(losses["others_reg_loss"], 0)
 
         trainer.net = torch.nn.Module()
         trainer.net.backbone = torch.nn.Linear(2, 2)
         trainer.net.decoder = torch.nn.Linear(2, 2)
         trainer.net.dense_predictor = torch.nn.Linear(2, 2)
-        trainer.lr = 3e-4
+        trainer.lr = 1e-4
         trainer.weight_decay = 1e-4
-        trainer.head_lr_scale = 10 / 3
-        trainer.warmup_epochs = 10
-        trainer.epochs = 60
+        trainer.warmup_epochs = 2
+        trainer.epochs = 15
         optimizers, _ = trainer.configure_optimizers()
 
+        self.assertTrue(
+            all("lr_scale" not in group for group in optimizers[0].param_groups)
+        )
         self.assertEqual(
-            {group["lr_scale"] for group in optimizers[0].param_groups},
-            {1.0, 10 / 3},
+            len({group["lr"] for group in optimizers[0].param_groups}), 1
         )
 
     def test_temperature_search_includes_uncalibrated_score(self):

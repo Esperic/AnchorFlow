@@ -15,12 +15,9 @@ target:
   pretrained_weights: ${pretrained_weights}
   lr: ${lr}
   weight_decay: ${weight_decay}
-  head_lr_scale: ${head_lr_scale}
-  fde_loss_weight: ${fde_loss_weight}
-  cls_temperature: ${cls_temperature}
-  mr_loss_weight: ${mr_loss_weight}
+  winner_fde_weight: ${winner_fde_weight}
+  endpoint_reg_weight: ${endpoint_reg_weight}
   other_loss_weight: ${other_loss_weight}
-  miss_threshold: ${miss_threshold}
   probability_temperature: ${probability_temperature}
   epochs: ${epochs}
   warmup_epochs: ${warmup_epochs}
