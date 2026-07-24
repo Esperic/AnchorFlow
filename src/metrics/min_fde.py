@@ -17,6 +17,7 @@ class minFDE(Metric):
         dist_sync_on_step: bool = False,
         process_group: Optional[Any] = None,
         dist_sync_fn: Callable = None,
+        brier: bool = False,
     ) -> None:
         super(minFDE, self).__init__(
             compute_on_step=compute_on_step,
@@ -25,16 +26,24 @@ class minFDE(Metric):
             dist_sync_fn=dist_sync_fn,
         )
         self.k = k
+        self.brier = brier
         self.add_state("sum", default=torch.tensor(0.0), dist_reduce_fx="sum")
         self.add_state("count", default=torch.tensor(0), dist_reduce_fx="sum")
 
     def update(self, outputs: Dict[str, torch.Tensor], target: torch.Tensor) -> None:
         with torch.no_grad():
-            pred, _ = sort_predictions(outputs["y_hat"], outputs["pi"], k=self.k)
+            pred, probability = sort_predictions(
+                outputs["y_hat"], outputs["pi"], k=self.k
+            )
             fde = torch.norm(
                 pred[..., -1, :2] - target.unsqueeze(1)[..., -1, :2], p=2, dim=-1
             )
-            min_fde = fde.min(-1)[0]
+            min_fde, min_idx = fde.min(-1)
+            if self.brier:
+                best_probability = probability.softmax(-1).gather(
+                    -1, min_idx.unsqueeze(-1)
+                )
+                min_fde += (1 - best_probability.squeeze(-1)).square()
             self.sum += min_fde.sum()
             self.count += pred.shape[0]
 

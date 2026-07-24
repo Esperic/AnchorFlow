@@ -58,6 +58,7 @@ class Trainer(pl.LightningModule):
                 "minADE6": minADE(k=6),
                 "minFDE1": minFDE(k=1),
                 "minFDE6": minFDE(k=6),
+                "b-minFDE6": minFDE(k=6, brier=True),
                 "MR": MR(),
             }
         )
