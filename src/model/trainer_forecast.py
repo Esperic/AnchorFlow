@@ -1,4 +1,3 @@
-import datetime
 from pathlib import Path
 
 import pytorch_lightning as pl
@@ -30,12 +29,28 @@ class Trainer(pl.LightningModule):
         warmup_epochs: int = 10,
         epochs: int = 60,
         weight_decay: float = 1e-4,
+        fde_loss_weight: float = 0.5,
+        cls_temperature: float = 1.0,
+        mr_loss_weight: float = 0.1,
+        other_loss_weight: float = 0.25,
+        miss_threshold: float = 2.0,
+        head_lr_scale: float = 10 / 3,
+        probability_temperature: float = 1.0,
     ) -> None:
         super(Trainer, self).__init__()
         self.warmup_epochs = warmup_epochs
         self.epochs = epochs
         self.lr = lr
         self.weight_decay = weight_decay
+        self.fde_loss_weight = fde_loss_weight
+        self.cls_temperature = cls_temperature
+        self.mr_loss_weight = mr_loss_weight
+        self.other_loss_weight = other_loss_weight
+        self.miss_threshold = miss_threshold
+        self.head_lr_scale = head_lr_scale
+        self.probability_temperature = probability_temperature
+        if cls_temperature <= 0 or probability_temperature <= 0:
+            raise ValueError("temperatures must be positive")
         self.save_hyperparameters()
         self.submission_handler = SubmissionAv2()
 
@@ -67,9 +82,13 @@ class Trainer(pl.LightningModule):
     def forward(self, data):
         return self.net(data)
 
+    def metric_outputs(self, out):
+        return {**out, "pi": out["pi"] / self.probability_temperature}
+
     def predict(self, data):
         with torch.no_grad():
             out = self.net(data)
+        out = self.metric_outputs(out)
         predictions, prob = self.submission_handler.format_data(
             data, out["y_hat"], out["pi"], inference=True
         )
@@ -79,24 +98,41 @@ class Trainer(pl.LightningModule):
         y_hat, pi, y_hat_others = out["y_hat"], out["pi"], out["y_hat_others"]
         y, y_others = data["y"][:, 0], data["y"][:, 1:]
 
-        l2_norm = torch.norm(y_hat[..., :2] - y.unsqueeze(1), dim=-1).sum(dim=-1)
-        best_mode = torch.argmin(l2_norm, dim=-1)
-        y_hat_best = y_hat[torch.arange(y_hat.shape[0]), best_mode]
+        displacement = torch.norm(y_hat[..., :2] - y.unsqueeze(1), dim=-1)
+        ade = displacement.mean(-1)
+        fde = displacement[..., -1]
+        quality = ade + self.fde_loss_weight * fde
+        best_mode = quality.argmin(-1)
 
-        agent_reg_loss = F.smooth_l1_loss(y_hat_best[..., :2], y)
-        agent_cls_loss = F.cross_entropy(pi, best_mode.detach())
+        agent_reg_loss = quality.gather(-1, best_mode.unsqueeze(-1)).mean()
+        target_probability = torch.softmax(
+            -quality.detach() / self.cls_temperature, dim=-1
+        )
+        agent_cls_loss = -(
+            target_probability * torch.log_softmax(pi, dim=-1)
+        ).sum(-1).mean()
+        mr_loss = torch.relu(fde.min(-1).values - self.miss_threshold).mean()
 
         others_reg_mask = ~data["x_padding_mask"][:, 1:, 50:]
-        others_reg_loss = F.smooth_l1_loss(
-            y_hat_others[others_reg_mask], y_others[others_reg_mask]
-        )
+        if others_reg_mask.any():
+            others_reg_loss = F.smooth_l1_loss(
+                y_hat_others[others_reg_mask], y_others[others_reg_mask]
+            )
+        else:
+            others_reg_loss = y_hat_others.sum() * 0
 
-        loss = agent_reg_loss + agent_cls_loss + others_reg_loss
+        loss = (
+            agent_reg_loss
+            + agent_cls_loss
+            + self.mr_loss_weight * mr_loss
+            + self.other_loss_weight * others_reg_loss
+        )
 
         return {
             "loss": loss,
             "reg_loss": agent_reg_loss.item(),
             "cls_loss": agent_cls_loss.item(),
+            "mr_loss": mr_loss.item(),
             "others_reg_loss": others_reg_loss.item(),
         }
 
@@ -119,7 +155,7 @@ class Trainer(pl.LightningModule):
     def validation_step(self, data, batch_idx):
         out = self(data)
         losses = self.cal_loss(out, data)
-        metrics = self.val_metrics(out, data["y"][:, 0])
+        metrics = self.val_metrics(self.metric_outputs(out), data["y"][:, 0])
 
         self.log(
             "val/reg_loss",
@@ -134,20 +170,17 @@ class Trainer(pl.LightningModule):
             prog_bar=True,
             on_step=False,
             on_epoch=True,
-            batch_size=1,
+            batch_size=data["y"].shape[0],
             sync_dist=True,
         )
 
     def on_test_start(self) -> None:
         save_dir = Path("./submission")
         save_dir.mkdir(exist_ok=True)
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M")
-        self.submission_handler = SubmissionAv2(
-            save_dir=save_dir, filename=f"forecast_mae_{timestamp}"
-        )
+        self.submission_handler = SubmissionAv2(save_dir=save_dir)
 
     def test_step(self, data, batch_idx) -> None:
-        out = self(data)
+        out = self.metric_outputs(self(data))
         self.submission_handler.format_data(data, out["y_hat"], out["pi"])
 
     def on_test_end(self) -> None:
@@ -195,20 +228,32 @@ class Trainer(pl.LightningModule):
         assert len(inter_params) == 0
         assert len(param_dict.keys() - union_params) == 0
 
-        optim_groups = [
-            {
-                "params": [
-                    param_dict[param_name] for param_name in sorted(list(decay))
-                ],
-                "weight_decay": self.weight_decay,
-            },
-            {
-                "params": [
-                    param_dict[param_name] for param_name in sorted(list(no_decay))
-                ],
-                "weight_decay": 0.0,
-            },
-        ]
+        optim_groups = []
+        for names, weight_decay in (
+            (decay, self.weight_decay),
+            (no_decay, 0.0),
+        ):
+            for is_head, lr_scale in (
+                (False, 1.0),
+                (True, self.head_lr_scale),
+            ):
+                group_names = [
+                    name
+                    for name in sorted(names)
+                    if (
+                        name.startswith("net.decoder.")
+                        or name.startswith("net.dense_predictor.")
+                    )
+                    == is_head
+                ]
+                if group_names:
+                    optim_groups.append(
+                        {
+                            "params": [param_dict[name] for name in group_names],
+                            "weight_decay": weight_decay,
+                            "lr_scale": lr_scale,
+                        }
+                    )
 
         optimizer = torch.optim.AdamW(
             optim_groups, lr=self.lr, weight_decay=self.weight_decay

@@ -1,5 +1,6 @@
 name: forecast-mae
 phase: pretrain
+monitor: val_loss
 
 target:
   _target_: src.model.trainer_mae.Trainer

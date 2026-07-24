@@ -16,7 +16,10 @@ def main(conf):
     model_path = conf.model.target._target_
     module = import_module(model_path[: model_path.rfind(".")])
     Model: pl.LightningModule = getattr(module, model_path[model_path.rfind(".") + 1 :])
-    model = Model.load_from_checkpoint(checkpoint)
+    load_kwargs = {}
+    if "probability_temperature" in conf.model.target:
+        load_kwargs["probability_temperature"] = conf.probability_temperature
+    model = Model.load_from_checkpoint(checkpoint, **load_kwargs)
 
     trainer = pl.Trainer(
         logger=False,

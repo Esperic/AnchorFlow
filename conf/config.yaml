@@ -4,7 +4,7 @@ defaults:
   - model: model_forecast
 
 seed: 2333
-monitor: val_loss
+monitor: ${model.monitor}
 save_top_k: 10
 
 data_root:
@@ -23,6 +23,13 @@ warmup_epochs: 10
 # optimizer
 lr: 0.001
 weight_decay: 1e-4
+head_lr_scale: 3.3333333333333335
+fde_loss_weight: 0.5
+cls_temperature: 1.0
+mr_loss_weight: 0.1
+other_loss_weight: 0.25
+miss_threshold: 2.0
+probability_temperature: 1.0
 gradient_clip_val: 5
 gradient_clip_algorithm: norm
 
